@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>OrderPage</class>
+ <widget class="QWidget" name="OrderPage">
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <property name="leftMargin"><number>12</number></property>
+   <property name="topMargin"><number>12</number></property>
+   <property name="rightMargin"><number>12</number></property>
+   <property name="bottomMargin"><number>0</number></property>
+   <property name="spacing"><number>6</number></property>
+   <item>
+    <layout class="QHBoxLayout" name="orderFilterLayout">
+     <property name="spacing"><number>6</number></property>
+     <item><widget class="QLabel" name="startLabel"><property name="text"><string>开始:</string></property></widget></item>
+     <item><widget class="QDateEdit" name="startDateEdit"/></item>
+     <item><widget class="QLabel" name="endLabel"><property name="text"><string>截止:</string></property></widget></item>
+     <item><widget class="QDateEdit" name="endDateEdit"/></item>
+     <item><widget class="QLabel" name="accountLabel"><property name="text"><string>游戏账号:</string></property></widget></item>
+     <item><widget class="QLineEdit" name="accountEdit"/></item>
+     <item><widget class="QComboBox" name="exchangeTypeComboBox"/></item>
+     <item><widget class="QComboBox" name="partitionComboBox"/></item>
+     <item><widget class="QPushButton" name="searchOrderButton"><property name="text"><string>开始查询</string></property></widget></item>
+     <item><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+    </layout>
+   </item>
+   <item><widget class="QLabel" name="orderCountLabel"><property name="text"><string>共 0 条记录</string></property></widget></item>
+   <item><widget class="QTableWidget" name="orderTable"/></item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

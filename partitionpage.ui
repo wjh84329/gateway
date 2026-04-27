@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>PartitionPage</class>
+ <widget class="QWidget" name="PartitionPage">
+  <layout class="QHBoxLayout" name="horizontalLayout">
+   <property name="leftMargin"><number>0</number></property>
+   <property name="topMargin"><number>0</number></property>
+   <property name="rightMargin"><number>0</number></property>
+   <property name="bottomMargin"><number>0</number></property>
+   <property name="spacing"><number>0</number></property>
+   <item>
+    <widget class="QFrame" name="partitionSideBar">
+     <property name="minimumSize"><size><width>120</width><height>0</height></size></property>
+     <property name="maximumSize"><size><width>120</width><height>16777215</height></size></property>
+     <layout class="QVBoxLayout" name="partitionSideBarLayout">
+      <property name="spacing"><number>0</number></property>
+      <item><widget class="QPushButton" name="partitionManageMenuButton"><property name="text"><string>分区管理</string></property></widget></item>
+      <item><widget class="QPushButton" name="partitionTemplateMenuButton"><property name="text"><string>分区模板</string></property></widget></item>
+      <item><widget class="QPushButton" name="groupManageMenuButton"><property name="text"><string>分组管理</string></property></widget></item>
+      <item><spacer name="verticalSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer></item>
+     </layout>
+    </widget>
+   </item>
+   <item><widget class="QStackedWidget" name="contentStack"/></item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

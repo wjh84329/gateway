@@ -1,0 +1,27 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "cmake-build",
+            "type": "shell",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "\"D:/Program Files/Microsoft Visual Studio/18/Community/Common7/Tools/VsDevCmd.bat\" -arch=x64 && set PATH=C:\\Qt\\6.11.0\\msvc2022_64\\bin;%PATH% && \"D:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" -S \"${workspaceFolder}\" -B \"${workspaceFolder}/out/build/debug\" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH=C:/Qt/6.11.0/msvc2022_64 && \"D:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" --build \"${workspaceFolder}/out/build/debug\" --config Debug"
+            ],
+            "group": { "kind": "build", "isDefault": true },
+            "presentation": { "reveal": "always", "panel": "shared" }
+        },
+        {
+            "label": "cmake-clean-build",
+            "type": "shell",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "rmdir /s /q \"${workspaceFolder}\\out\\build\\debug\" & \"D:/Program Files/Microsoft Visual Studio/18/Community/Common7/Tools/VsDevCmd.bat\" -arch=x64 && set PATH=C:\\Qt\\6.11.0\\msvc2022_64\\bin;%PATH% && \"D:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" -S \"${workspaceFolder}\" -B \"${workspaceFolder}/out/build/debug\" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH=C:/Qt/6.11.0/msvc2022_64 && \"D:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe\" --build \"${workspaceFolder}/out/build/debug\" --config Debug"
+            ],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" }
+        }
+    ]
+}
