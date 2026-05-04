@@ -459,6 +459,33 @@ QString ReadStringField(const QJsonObject &object, const QStringList &names)
     return {};
 }
 
+bool PublishManualReissueResult(const QJsonObject &dataObject, bool reissueOk)
+{
+    const auto config = AppConfig::Load();
+    const QString orderNumber = ReadStringField(dataObject, {QStringLiteral("OrderNumber"), QStringLiteral("orderNumber")});
+    const QString randomCode = ReadStringField(dataObject, {QStringLiteral("RandomCode"), QStringLiteral("randomCode")});
+
+    QJsonObject responseObject;
+    responseObject.insert(QStringLiteral("OrderNumber"), orderNumber);
+    responseObject.insert(QStringLiteral("RandomCode"), randomCode);
+    responseObject.insert(QStringLiteral("SecretKey"), config.secretKey);
+    responseObject.insert(QStringLiteral("Status"), reissueOk ? QStringLiteral("success") : QStringLiteral("failed"));
+
+    QString notifyErrorMessage;
+    if (!RabbitMqService::PublishReissueResult(config,
+                                               QString::fromUtf8(QJsonDocument(responseObject).toJson(QJsonDocument::Compact)),
+                                               &notifyErrorMessage)) {
+        AppLogger::WriteLog(QStringLiteral("发送手动补发完成通知失败：%1")
+                                .arg(notifyErrorMessage.isEmpty() ? QStringLiteral("未知错误") : notifyErrorMessage));
+        return false;
+    }
+
+    AppLogger::WriteLog(QStringLiteral("发送手动补发完成通知成功：订单=%1，状态=%2")
+                            .arg(orderNumber.isEmpty() ? QStringLiteral("<empty>") : orderNumber,
+                                 reissueOk ? QStringLiteral("success") : QStringLiteral("failed")));
+    return true;
+}
+
 QStringList ResolveConfiguredRootPaths(const QString &configuredPath)
 {
     QStringList roots;
@@ -819,7 +846,10 @@ bool HandleManualReissueMessage(const QJsonObject &object)
                                 ? QStringLiteral("手动补发处理失败：无法解析补发消息")
                                 : QStringLiteral("手动补发处理失败：无法解析补发消息 %1").arg(decodedText.left(300)));
     }
-    return HandleRechargeDataObject(dataObject, QStringLiteral("补发"), false);
+
+    const bool reissueOk = HandleRechargeDataObject(dataObject, QStringLiteral("补发"), false);
+    PublishManualReissueResult(dataObject, reissueOk);
+    return reissueOk;
 }
 
 bool HandleOrderUpdateMessage(const QJsonObject &object)

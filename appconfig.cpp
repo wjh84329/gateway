@@ -34,6 +34,11 @@ QString NormalizeMonitorRootPathList(const QString &paths)
     return normalizedPaths.join(QLatin1Char('|'));
 }
 
+QString ConfigDirectoryPath()
+{
+    return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("Libs"));
+}
+
 void WriteDefaultConfig(QSettings &settings)
 {
     settings.beginGroup(QStringLiteral("ConnectionStrings"));
@@ -90,7 +95,7 @@ QString AutoStartCommand()
 
 QString AppConfig::ConfigFilePath()
 {
-    return QCoreApplication::applicationDirPath() + QStringLiteral("/Config.ini");
+    return QDir(ConfigDirectoryPath()).filePath(QStringLiteral("setting.config"));
 }
 
 void AppConfig::EnsureConfigExists()
@@ -98,6 +103,8 @@ void AppConfig::EnsureConfigExists()
     if (QFileInfo::exists(ConfigFilePath())) {
         return;
     }
+
+    QDir().mkpath(ConfigDirectoryPath());
 
     QSettings settings(ConfigFilePath(), QSettings::IniFormat);
     WriteDefaultConfig(settings);
@@ -115,6 +122,7 @@ AppConfigValues AppConfig::Load()
     values.merchantName = settings.value(QStringLiteral("MerchantName"), QStringLiteral("Tenant")).toString();
     values.gatewayId = settings.value(QStringLiteral("GatewayId"), QStringLiteral("1122")).toString();
     values.website = settings.value(QStringLiteral("Domain"), QStringLiteral("http://new.7xpay.com/")).toString();
+    values.installStartPath = settings.value(QStringLiteral("InstallStartPath"), QStringLiteral("D:/")).toString();
     values.yxsmDir = NormalizeMonitorRootPathList(settings.value(QStringLiteral("YxsmDir"), QStringLiteral("")).toString());
     values.wxValidPath = NormalizeMonitorRootPathList(settings.value(QStringLiteral("WxValidPath"), QStringLiteral("D:/")).toString());
     values.paidDir = settings.value(QStringLiteral("PaidDir"), QStringLiteral("D:/aaa.txt")).toString();

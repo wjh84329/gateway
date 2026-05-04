@@ -19,6 +19,7 @@ bool Publish(const AppConfigValues &config,
              const QString &payload,
              QString *errorMessage = nullptr);
 bool UpdateOrder(const AppConfigValues &config, const QString &payload, QString *errorMessage = nullptr);
+bool PublishReissueResult(const AppConfigValues &config, const QString &payload, QString *errorMessage = nullptr);
 bool UpdateOrderAccount(const AppConfigValues &config, const QString &payload, QString *errorMessage = nullptr);
 bool UpdateCheck(const AppConfigValues &config, const QString &payload, QString *errorMessage = nullptr);
 bool PaidApply(const AppConfigValues &config, const QString &payload, QString *errorMessage = nullptr);

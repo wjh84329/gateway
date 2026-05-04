@@ -2,13 +2,13 @@
     "cmake.generator": "Ninja",
     "cmake.buildDirectory": "${workspaceFolder}/out/build/debug",
     "cmake.configureArgs": [
-        "-DCMAKE_PREFIX_PATH=C:/Qt/6.11.0/msvc2022_64"
+        "-DCMAKE_PREFIX_PATH=D:/Qt/6.11.0/msvc2022_64"
     ],
     "cmake.buildEnvironment": {
-        "PATH": "C:\\Qt\\6.11.0\\msvc2022_64\\bin;${env:PATH}"
+        "PATH": "D:\\Qt\\6.11.0\\msvc2022_64\\bin;D:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\Ninja;${env:PATH}"
     },
     "cmake.configureEnvironment": {
-        "PATH": "C:\\Qt\\6.11.0\\msvc2022_64\\bin;${env:PATH}"
+        "PATH": "D:\\Qt\\6.11.0\\msvc2022_64\\bin;D:\\Program Files\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\Ninja;${env:PATH}"
     },
     "cmake.toolset": "host=x64",
     "cmake.preferredGenerators": ["Ninja"],

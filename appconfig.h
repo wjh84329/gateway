@@ -8,6 +8,7 @@ struct AppConfigValues
     QString merchantName;
     QString gatewayId;
     QString website;
+    QString installStartPath;
     QString yxsmDir;
     QString wxValidPath;
     QString paidDir;

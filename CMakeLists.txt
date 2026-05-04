@@ -52,6 +52,8 @@ set(PROJECT_SOURCES
         partitionpage.cpp
         partitionpage.h
         partitionpage.ui
+        partitiondialog.cpp
+        partitiondialog.h
         partitionmanagepage.cpp
         partitionmanagepage.h
         partitionmanagepage.ui

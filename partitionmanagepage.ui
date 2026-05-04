@@ -3,20 +3,75 @@
  <class>PartitionManagePage</class>
  <widget class="QWidget" name="PartitionManagePage">
   <layout class="QVBoxLayout" name="verticalLayout">
-   <property name="leftMargin"><number>16</number></property>
-   <property name="topMargin"><number>8</number></property>
-   <property name="rightMargin"><number>16</number></property>
+   <property name="leftMargin"><number>0</number></property>
+   <property name="topMargin"><number>0</number></property>
+   <property name="rightMargin"><number>0</number></property>
    <property name="bottomMargin"><number>0</number></property>
-   <property name="spacing"><number>6</number></property>
+   <property name="spacing"><number>0</number></property>
    <item>
-    <layout class="QHBoxLayout" name="actionLayout">
-     <property name="spacing"><number>14</number></property>
-     <item><widget class="QPushButton" name="addPartitionButton"><property name="text"><string>添加分区</string></property></widget></item>
-     <item><widget class="QPushButton" name="refreshPartitionButton"><property name="text"><string>刷新分区</string></property></widget></item>
-     <item><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
-    </layout>
+    <widget class="QSplitter" name="splitter">
+     <property name="orientation">Qt::Horizontal</property>
+     <widget class="QWidget" name="leftPanel">
+      <layout class="QVBoxLayout" name="leftLayout">
+       <property name="leftMargin"><number>12</number></property>
+       <property name="topMargin"><number>8</number></property>
+       <property name="rightMargin"><number>6</number></property>
+       <property name="bottomMargin"><number>6</number></property>
+       <property name="spacing"><number>6</number></property>
+       <item>
+        <layout class="QHBoxLayout" name="actionLayout">
+         <property name="spacing"><number>10</number></property>
+         <item><widget class="QPushButton" name="addPartitionButton"><property name="text"><string>添加分区</string></property></widget></item>
+         <item><widget class="QPushButton" name="refreshPartitionButton"><property name="text"><string>刷新分区</string></property></widget></item>
+         <item><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QTableWidget" name="partitionTable"/>
+       </item>
+      </layout>
+     </widget>
+     <!-- <widget class="QWidget" name="rightPanel">
+      <layout class="QVBoxLayout" name="rightLayout">
+       <property name="leftMargin"><number>8</number></property>
+       <property name="topMargin"><number>60</number></property>
+       <property name="rightMargin"><number>12</number></property>
+       <property name="bottomMargin"><number>6</number></property>
+       <property name="spacing"><number>10</number></property>
+       <item>
+        <widget class="QLabel" name="rightPanelTitle">
+         <property name="text"><string>分区操作</string></property>
+         <property name="alignment"><enum>Qt::AlignCenter</enum></property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="editPartitionButton">
+         <property name="text"><string>编辑分区</string></property>
+         <property name="enabled">false</property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="loadPartitionButton">
+         <property name="text"><string>加载分区</string></property>
+         <property name="enabled">false</property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="deletePartitionButton">
+         <property name="text"><string>删除分区</string></property>
+         <property name="enabled">false</property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="verticalSpacer">
+         <property name="orientation"><enum>Qt::Vertical</enum></property>
+         <property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property>
+        </spacer>
+       </item>
+      </layout>
+     </widget> -->
+    </widget>
    </item>
-   <item><widget class="QTableWidget" name="partitionTable"/></item>
   </layout>
  </widget>
  <resources/>

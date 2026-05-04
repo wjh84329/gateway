@@ -1298,6 +1298,15 @@ bool UpdateOrder(const AppConfigValues &config, const QString &payload, QString 
                                  errorMessage);
 }
 
+bool PublishReissueResult(const AppConfigValues &config, const QString &payload, QString *errorMessage)
+{
+    return PublishWithKnownRoute(config,
+                                 QStringLiteral("TenantServer.Extensions.EasyNetQ.ReissueResult, TenantServer"),
+                                 QStringLiteral("TenantServer.Extensions.EasyNetQ.ReissueResult, TenantServer"),
+                                 payload,
+                                 errorMessage);
+}
+
 bool UpdateOrderAccount(const AppConfigValues &config, const QString &payload, QString *errorMessage)
 {
     return PublishWithKnownRoute(config,

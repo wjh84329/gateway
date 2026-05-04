@@ -5,12 +5,12 @@
             "name": "Debug cs",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/out/build/debug/cs.exe",
+            "program": "${workspaceFolder}/out/build/debug/Debug/cs.exe",
             "args": [],
             "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/out/build/debug",
+            "cwd": "${workspaceFolder}/out/build/debug/Debug",
             "environment": [
-                { "name": "PATH", "value": "C:/Qt/6.11.0/msvc2022_64/bin;${env:PATH}" }
+                { "name": "PATH", "value": "D:/Qt/6.11.0/msvc2022_64/bin;${env:PATH}" }
             ],
             "preLaunchTask": "cmake-build",
             "console": "internalConsole"
