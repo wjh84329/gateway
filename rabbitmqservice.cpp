@@ -722,9 +722,6 @@ bool ExecuteAmqpPublish(const AppConfigValues &config,
         return false;
     }
 
-    AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 发送消息：exchange=%1, type=%2, payload=%3")
-                            .arg(exchange, messageType, payload.left(500)));
-
     if (socket.waitForReadyRead(500)) {
         quint8 frameType = 0;
         quint16 channel = 0;
@@ -931,12 +928,8 @@ private:
     {
         m_startupError.clear();
         m_lastError.clear();
-        AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP TCP 已连接：%1:%2")
-                                .arg(ResolvedHost(m_config))
-                                .arg(ResolvedAmqpPort(m_config)));
         m_socket.write(BuildProtocolHeader());
         m_socket.flush();
-        AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 协议头已发送"));
     }
 
     void OnReadyRead()
@@ -997,7 +990,6 @@ private:
         int offset = 4;
 
         if (classId == 10 && methodId == 10) {
-            AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 收到 Connection.Start，发送 Start-Ok"));
             m_socket.write(BuildMethodFrame(0, 10, 11, BuildConnectionStartOkArguments(m_config)));
             return;
         }
@@ -1008,7 +1000,6 @@ private:
             offset += 4;
             m_heartbeatSeconds = ReadUInt16(payload, offset);
 
-            AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 收到 Connection.Tune，发送 Tune-Ok/Open"));
             m_socket.write(BuildMethodFrame(0, 10, 31, BuildConnectionTuneOkArguments(channelMax, m_frameMax, m_heartbeatSeconds)));
             m_socket.write(BuildMethodFrame(0, 10, 40, BuildConnectionOpenArguments(ResolvedVirtualHost(m_config))));
             if (m_heartbeatSeconds > 0) {
@@ -1017,27 +1008,22 @@ private:
             return;
         }
         if (classId == 10 && methodId == 41) {
-            AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 虚拟主机已打开，发送 Channel.Open"));
             m_socket.write(BuildMethodFrame(1, 20, 10, BuildChannelOpenArguments()));
             return;
         }
         if (classId == 20 && methodId == 11) {
-            AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 通道已打开，发送 Queue.Declare：%1").arg(ResolveQueueName(m_config)));
             m_socket.write(BuildMethodFrame(1, 50, 10, BuildQueueDeclareArguments(ResolveQueueName(m_config))));
             return;
         }
         if (classId == 50 && methodId == 11) {
-            AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 队列已声明，发送 Basic.Consume：%1").arg(ResolveQueueName(m_config)));
             m_socket.write(BuildMethodFrame(1, 60, 20, BuildBasicConsumeArguments(ResolveQueueName(m_config))));
             return;
         }
         if (classId == 60 && methodId == 21) {
             m_consumerReady = true;
-            AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 消费者已启动，队列：%1").arg(ResolveQueueName(m_config)));
             return;
         }
         if (classId == 60 && methodId == 60) {
-            AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 收到 Basic.Deliver"));
             m_waitingForMessageBody = true;
             m_pendingMessageBody.clear();
             m_pendingMessageBodySize = 0;
@@ -1154,16 +1140,12 @@ private:
                     payload = QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact));
                 }
             }
-            AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 消息类型：%1").arg(m_pendingMessageType));
         }
 
-        AppLogger::WriteLog(QStringLiteral("RabbitMQ 原始消息：%1").arg(payload.left(500)));
         m_pendingMessageType.clear();
 
         if (g_messageHandler) {
             g_messageHandler(payload);
-        } else {
-            AppLogger::WriteLog(QStringLiteral("收到RabbitMQ消息：%1").arg(payload));
         }
     }
 
@@ -1171,7 +1153,6 @@ private:
     {
         if (m_socket.state() == QAbstractSocket::ConnectedState) {
             m_socket.write(BuildFrame(8, 0, {}));
-            AppLogger::WriteLog(QStringLiteral("RabbitMQ AMQP 心跳已发送"));
         }
     }
 
@@ -1256,15 +1237,6 @@ bool TestConnection(const AppConfigValues &config, QString *errorMessage)
 
 bool StartListening(const AppConfigValues &config, QString *errorMessage)
 {
-    AppLogger::WriteLog(QStringLiteral("RabbitMQ Socket 解密内容：%1").arg(ResolveSocketConfigText(config)));
-    AppLogger::WriteLog(QStringLiteral("RabbitMQ 当前连接参数：host=%1, amqpPort=%2, managementPort=%3, vhost=%4, user=%5, queue=%6")
-                            .arg(ResolvedHost(config))
-                            .arg(ResolvedAmqpPort(config))
-                            .arg(ResolvedManagementPort(config))
-                            .arg(ResolvedVirtualHost(config))
-                            .arg(ResolvedUser(config))
-                            .arg(ResolveQueueName(config)));
-
     if (!g_listener) {
         g_listener = new RabbitMqListener(qApp);
     }

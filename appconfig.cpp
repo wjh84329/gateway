@@ -1,7 +1,11 @@
 #include "appconfig.h"
+#include "applogger.h"
+#include "gatewayapiclient.h"
+#include "machinecode.h"
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QSettings>
 
@@ -47,7 +51,7 @@ void WriteDefaultConfig(QSettings &settings)
 
     settings.beginGroup(QStringLiteral("AppSettings"));
     settings.setValue(QStringLiteral("MerchantName"), QStringLiteral("Tenant"));
-    settings.setValue(QStringLiteral("GatewayId"), QStringLiteral("1122"));
+    settings.setValue(QStringLiteral("MerchantUuid"), QStringLiteral(""));
     settings.setValue(QStringLiteral("IsOpenLog"), true);
     settings.setValue(QStringLiteral("IsOpenOrderReissue"), true);
     settings.setValue(QStringLiteral("IsSm"), false);
@@ -69,9 +73,12 @@ void WriteDefaultConfig(QSettings &settings)
     settings.setValue(QStringLiteral("InstallStartPath"), QStringLiteral("D:/"));
     settings.setValue(QStringLiteral("WxValidPath"), QStringLiteral("D:/"));
     settings.setValue(QStringLiteral("YxsmDir"), QStringLiteral(""));
-    settings.setValue(QStringLiteral("PaidDir"), QStringLiteral("D:/aaa.txt"));
+    settings.setValue(QStringLiteral("PaidDir"), QStringLiteral(""));
     settings.setValue(QStringLiteral("Port"), QStringLiteral("9527"));
+    settings.setValue(QStringLiteral("GatewayAdvertisedIp"), QStringLiteral(""));
+    settings.setValue(QStringLiteral("GatewayAdvertisedIpAutoDetect"), true);
     settings.setValue(QStringLiteral("SqlConnectionStr"), QStringLiteral("Data Source=.;Initial Catalog=MuOnline18;Integrated Security=True"));
+    settings.setValue(QStringLiteral("UpdateManifestUrl"), QStringLiteral(""));
     settings.endGroup();
 }
 
@@ -98,6 +105,49 @@ QString AppConfig::ConfigFilePath()
     return QDir(ConfigDirectoryPath()).filePath(QStringLiteral("setting.config"));
 }
 
+bool AppConfig::MergeIniAddMissingKeys(const QString &userPath, const QString &packagePath, const QString &destPath, QString *errorMessage)
+{
+    if (!QFileInfo::exists(userPath)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("本机配置不存在：%1").arg(userPath);
+        }
+        return false;
+    }
+    if (!QFileInfo::exists(packagePath)) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("安装包配置不存在：%1").arg(packagePath);
+        }
+        return false;
+    }
+
+    QSettings user(userPath, QSettings::IniFormat);
+    QSettings pkg(packagePath, QSettings::IniFormat);
+
+    QFile::remove(destPath);
+    QSettings out(destPath, QSettings::IniFormat);
+
+    const QStringList userKeys = user.allKeys();
+    for (const QString &k : userKeys) {
+        out.setValue(k, user.value(k));
+    }
+    const QStringList pkgKeys = pkg.allKeys();
+    for (const QString &k : pkgKeys) {
+        if (!user.contains(k)) {
+            out.setValue(k, pkg.value(k));
+        }
+    }
+    out.sync();
+
+    if (out.status() != QSettings::NoError) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("写入合并配置失败：%1").arg(destPath);
+        }
+        QFile::remove(destPath);
+        return false;
+    }
+    return true;
+}
+
 void AppConfig::EnsureConfigExists()
 {
     if (QFileInfo::exists(ConfigFilePath())) {
@@ -120,14 +170,25 @@ AppConfigValues AppConfig::Load()
 
     AppConfigValues values;
     values.merchantName = settings.value(QStringLiteral("MerchantName"), QStringLiteral("Tenant")).toString();
-    values.gatewayId = settings.value(QStringLiteral("GatewayId"), QStringLiteral("1122")).toString();
+    values.merchantUuid = settings.value(QStringLiteral("MerchantUuid"), QStringLiteral("")).toString();
     values.website = settings.value(QStringLiteral("Domain"), QStringLiteral("http://new.7xpay.com/")).toString();
     values.installStartPath = settings.value(QStringLiteral("InstallStartPath"), QStringLiteral("D:/")).toString();
     values.yxsmDir = NormalizeMonitorRootPathList(settings.value(QStringLiteral("YxsmDir"), QStringLiteral("")).toString());
+    values.yxsmDirVolumeRootsSeeded = settings.value(QStringLiteral("YxsmDirVolumeRootsSeeded"), false).toBool();
     values.wxValidPath = NormalizeMonitorRootPathList(settings.value(QStringLiteral("WxValidPath"), QStringLiteral("D:/")).toString());
-    values.paidDir = settings.value(QStringLiteral("PaidDir"), QStringLiteral("D:/aaa.txt")).toString();
+    values.paidDir = settings.value(QStringLiteral("PaidDir"), QStringLiteral("")).toString();
+    {
+        const QString legacyPaid = QDir::fromNativeSeparators(values.paidDir.trimmed());
+        if (legacyPaid.compare(QStringLiteral("D:/aaa.txt"), Qt::CaseInsensitive) == 0) {
+            values.paidDir.clear();
+            settings.setValue(QStringLiteral("PaidDir"), QStringLiteral(""));
+            settings.sync();
+        }
+    }
     values.restUrl = settings.value(QStringLiteral("RestUrl"), QStringLiteral("http://newapi.7xpay.com/")).toString();
     values.port = settings.value(QStringLiteral("Port"), QStringLiteral("9527")).toString();
+    values.gatewayAdvertisedIp = settings.value(QStringLiteral("GatewayAdvertisedIp"), QStringLiteral("")).toString();
+    values.gatewayAdvertisedIpAutoDetect = settings.value(QStringLiteral("GatewayAdvertisedIpAutoDetect"), true).toBool();
     values.rabbitMqHost = settings.value(QStringLiteral("RabbitMqHost"), QStringLiteral("127.0.0.1")).toString();
     values.rabbitMqAmqpPort = settings.value(QStringLiteral("RabbitMqAmqpPort"), 5672).toInt();
     values.rabbitMqManagementPort = settings.value(QStringLiteral("RabbitMqManagementPort"), 15672).toInt();
@@ -144,6 +205,8 @@ AppConfigValues AppConfig::Load()
     values.isWeixinMb = settings.value(QStringLiteral("IsWeixinMb"), false).toBool();
     values.bootUp = settings.value(QStringLiteral("BootUp"), false).toBool();
     values.isSm = settings.value(QStringLiteral("IsSm"), false).toBool();
+    values.mainWindowCloseAction = settings.value(QStringLiteral("MainWindowCloseAction"), QString()).toString().trimmed();
+    values.updateManifestUrl = settings.value(QStringLiteral("UpdateManifestUrl"), QString()).toString().trimmed();
 
     settings.endGroup();
 
@@ -161,12 +224,15 @@ void AppConfig::Save(const AppConfigValues &values)
     QSettings settings(ConfigFilePath(), QSettings::IniFormat);
     settings.beginGroup(QStringLiteral("AppSettings"));
     settings.setValue(QStringLiteral("MerchantName"), values.merchantName);
-    settings.setValue(QStringLiteral("GatewayId"), values.gatewayId);
+    settings.setValue(QStringLiteral("MerchantUuid"), values.merchantUuid);
     settings.setValue(QStringLiteral("Domain"), values.website);
     settings.setValue(QStringLiteral("YxsmDir"), NormalizeMonitorRootPathList(values.yxsmDir));
+    settings.setValue(QStringLiteral("YxsmDirVolumeRootsSeeded"), values.yxsmDirVolumeRootsSeeded);
     settings.setValue(QStringLiteral("WxValidPath"), NormalizeMonitorRootPathList(values.wxValidPath));
     settings.setValue(QStringLiteral("PaidDir"), values.paidDir);
     settings.setValue(QStringLiteral("Port"), values.port);
+    settings.setValue(QStringLiteral("GatewayAdvertisedIp"), values.gatewayAdvertisedIp);
+    settings.setValue(QStringLiteral("GatewayAdvertisedIpAutoDetect"), values.gatewayAdvertisedIpAutoDetect);
     settings.setValue(QStringLiteral("SqlConnectionStr"), values.sqlConnectionStr);
     settings.setValue(QStringLiteral("SecretKey"), values.secretKey);
     settings.setValue(QStringLiteral("SignKey"), values.signKey);
@@ -176,6 +242,8 @@ void AppConfig::Save(const AppConfigValues &values)
     settings.setValue(QStringLiteral("IsWeixinMb"), values.isWeixinMb);
     settings.setValue(QStringLiteral("BootUp"), values.bootUp);
     settings.setValue(QStringLiteral("IsSm"), values.isSm);
+    settings.setValue(QStringLiteral("MainWindowCloseAction"), values.mainWindowCloseAction);
+    settings.setValue(QStringLiteral("UpdateManifestUrl"), values.updateManifestUrl);
     settings.endGroup();
     settings.sync();
 }
@@ -202,4 +270,71 @@ void AppConfig::SetAutoStartEnabled(bool enabled)
 #else
     Q_UNUSED(enabled);
 #endif
+}
+
+namespace {
+struct AdvertisedIpResolveOutcome {
+    QString ip;
+    bool usedLocalFallback = false;
+    QString platDetail;
+    QString probeDetail;
+};
+
+AdvertisedIpResolveOutcome ResolveAdvertisedIpDetailed(const AppConfigValues &values)
+{
+    AdvertisedIpResolveOutcome o;
+    o.ip = MachineCode::PreferredLocalIPv4();
+    o.usedLocalFallback = true;
+
+    const QString rest = values.restUrl.trimmed();
+    const QString sec = values.secretKey.trimmed();
+    if (!rest.isEmpty() && !sec.isEmpty()) {
+        QString platErr;
+        const GatewayApiClient api(values);
+        const QString raw = api.UpdateClientIp(&platErr).trimmed();
+        QString v4;
+        if (MachineCode::TryNormalizeAdvertisedIpString(raw, &v4) && !v4.isEmpty()) {
+            o.ip = v4;
+            o.usedLocalFallback = false;
+            return o;
+        }
+        o.platDetail = platErr.trimmed().isEmpty() ? QStringLiteral("响应无效：%1").arg(raw.left(120)) : platErr.trimmed();
+    } else {
+        o.platDetail = QStringLiteral("未配置 RestUrl 或通讯密钥");
+    }
+
+    QString probeErr;
+    QString probeIp;
+    if (MachineCode::TryFetchPublicIPv4(&probeIp, &probeErr) && !probeIp.isEmpty()) {
+        o.ip = probeIp;
+        o.usedLocalFallback = false;
+        return o;
+    }
+    o.probeDetail = probeErr.trimmed().isEmpty() ? QStringLiteral("超时或响应无效") : probeErr.trimmed();
+    return o;
+}
+} // namespace
+
+QString AppConfig::ResolveGatewayAdvertisedIpForAutoDetect(const AppConfigValues &values)
+{
+    return ResolveAdvertisedIpDetailed(values).ip;
+}
+
+void AppConfig::RefreshGatewayAdvertisedIpForCurrentMachine(AppConfigValues &values)
+{
+    if (!values.gatewayAdvertisedIpAutoDetect) {
+        return;
+    }
+    const AdvertisedIpResolveOutcome r = ResolveAdvertisedIpDetailed(values);
+    if (r.usedLocalFallback) {
+        AppLogger::WriteLog(QStringLiteral("获取网关对外 IP：平台与备用探测均不可用，已使用本机 IPv4 %1（平台：%2；备用：%3）")
+                                .arg(r.ip,
+                                     r.platDetail.isEmpty() ? QStringLiteral("—") : r.platDetail,
+                                     r.probeDetail.isEmpty() ? QStringLiteral("—") : r.probeDetail));
+    }
+    if (values.gatewayAdvertisedIp.trimmed() == r.ip.trimmed()) {
+        return;
+    }
+    values.gatewayAdvertisedIp = r.ip;
+    Save(values);
 }

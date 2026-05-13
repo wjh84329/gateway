@@ -1,4 +1,5 @@
 #include "qrcodeencoder.h"
+#include "qrcodeencoder_matrix_build.h"
 
 #include <QByteArray>
 #include <QVector>
@@ -15,11 +16,13 @@ struct VersionInfo {
     int alignment;
 };
 
+// ECC L，与 QRCoder / ISO 18004 一致（见老网关 QrCoderUtil.GenerateAndSaveQrCodeAsync1）。
+// 注意 V6 为 2 块 RS：数据码字总数 136（68+68），不得写成单块 68，否则纠错与矩阵位序错误，无法扫码。
 const VersionInfo kVersions[] = {
     {3, 29, 55, 15, 1, 22},
     {4, 33, 80, 20, 1, 26},
     {5, 37, 108, 26, 1, 30},
-    {6, 41, 68, 18, 2, 34}
+    {6, 41, 136, 18, 2, 34}
 };
 
 const VersionInfo *FindVersionInfo(int version)
@@ -336,6 +339,25 @@ QVector<QVector<int>> BuildBaseMatrix(const VersionInfo &info, QVector<QVector<b
     return modules;
 }
 
+/// 与老网关 QrCoderUtil.GenerateAndSaveQrCodeAsync1 一致：QRCoder 全矩阵上居中裁去每边 4 个模块，
+/// 使用 (size - 8) × (size - 8)（如 V6：41→33）再输出 Mir；全尺寸会导致与脚本/客户端网格不对齐而无法扫码。
+QVector<QVector<int>> CropMirModuleMatrixLegacy(const QVector<QVector<int>> &fullModules)
+{
+    const int n = int(fullModules.size());
+    if (n <= 8) {
+        return fullModules;
+    }
+    const int out = n - 8;
+    const int start = (n - out) / 2;
+    QVector<QVector<int>> cropped(out, QVector<int>(out, 0));
+    for (int i = 0; i < out; ++i) {
+        for (int j = 0; j < out; ++j) {
+            cropped[i][j] = fullModules.at(start + i).at(start + j);
+        }
+    }
+    return cropped;
+}
+
 QByteArray BuildCodewords(const QString &data, const VersionInfo &info, bool *ok)
 {
     const QByteArray bytes = data.toUtf8();
@@ -472,67 +494,47 @@ QString BuildLegacyMirText(const QVector<QVector<int>> &modules,
     }
     return result;
 }
-}
 
-QString QrCodeEncoder::GenerateLegacyMirText(const QString &data,
-                                             const QString &resourceCode,
-                                             const QString &imageCode,
-                                             int serial,
-                                             int xOffset,
-                                             int yOffset,
-                                             QString *errorMessage)
+QString GenerateLegacyMirTextImpl(const QString &data,
+                                  const QString &resourceCode,
+                                  const QString &imageCode,
+                                  int serial,
+                                  int xOffset,
+                                  int yOffset,
+                                  QString *errorMessage)
 {
     const int version = serial > 0 ? serial : 6;
-    const VersionInfo *info = FindVersionInfo(version);
-    if (!info) {
+    if (!FindVersionInfo(version)) {
         if (errorMessage) {
             *errorMessage = QStringLiteral("不支持的二维码版本：%1").arg(version);
         }
         return {};
     }
 
-    bool ok = false;
-    const QByteArray codewords = BuildCodewords(data, *info, &ok);
-    if (!ok) {
-        if (errorMessage) {
-            *errorMessage = QStringLiteral("二维码内容超过版本 %1 容量").arg(version);
-        }
-        return {};
-    }
-
-    QVector<QVector<bool>> isFunction;
-    const QVector<QVector<int>> base = BuildBaseMatrix(*info, isFunction);
-    int bestPenalty = INT_MAX;
-    QVector<QVector<int>> bestModules;
-    for (int mask = 0; mask < 8; ++mask) {
-        QVector<QVector<int>> modules = base;
-        DrawCodewords(modules, isFunction, codewords);
-        for (int y = 0; y < info->size; ++y) {
-            for (int x = 0; x < info->size; ++x) {
-                if (!isFunction[y][x] && GetMaskBit(mask, x, y)) {
-                    modules[y][x] ^= 1;
-                }
-            }
-        }
-        DrawFormatBits(modules, isFunction, mask);
-        const int penalty = ComputePenalty(modules);
-        if (penalty < bestPenalty) {
-            bestPenalty = penalty;
-            bestModules = modules;
-        }
-    }
-
-    if (bestModules.isEmpty()) {
-        if (errorMessage) {
+    const QVector<QVector<int>> modules = QrMatrixBuildQrcoder160(data, version, errorMessage);
+    if (modules.isEmpty()) {
+        if (errorMessage && errorMessage->isEmpty()) {
             *errorMessage = QStringLiteral("二维码矩阵生成失败");
         }
         return {};
     }
 
-    return BuildLegacyMirText(bestModules,
+    return BuildLegacyMirText(modules,
                               resourceCode.isEmpty() ? QStringLiteral("46") : resourceCode,
                               imageCode.isEmpty() ? QStringLiteral("0") : imageCode,
                               version,
                               xOffset,
                               yOffset);
+}
+}
+
+QString QrCodeEncoder::GenerateLegacyMirText(const QString &data,
+                                               const QString &resourceCode,
+                                               const QString &imageCode,
+                                               int serial,
+                                               int xOffset,
+                                               int yOffset,
+                                               QString *errorMessage)
+{
+    return GenerateLegacyMirTextImpl(data, resourceCode, imageCode, serial, xOffset, yOffset, errorMessage);
 }

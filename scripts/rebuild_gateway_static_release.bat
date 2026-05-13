@@ -66,12 +66,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if exist "%BUILD_DIR%\cs.exe" (
+if exist "%BUILD_DIR%\支付网关.exe" (
     echo.
-    echo [成功] 已生成：%BUILD_DIR%\cs.exe
+    echo [成功] 已生成：%BUILD_DIR%\支付网关.exe
     echo        该文件为静态 Qt 版本，可用于“单文件直接运行”验证。
     exit /b 0
 )
 
-echo [错误] 编译完成后未找到 cs.exe
+echo [错误] 编译完成后未找到 支付网关.exe
 exit /b 1

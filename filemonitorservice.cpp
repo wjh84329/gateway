@@ -18,6 +18,7 @@
 #include <QStringList>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 enum class WatchKind {
@@ -171,16 +172,8 @@ QString DecodeTextFile(const QByteArray &data)
     return QString::fromLocal8Bit(data);
 }
 
-QString ReadInterestingLine(const QString &filePath, bool useLastLine)
+QStringList NonEmptyTrimmedLines(const QString &text)
 {
-    QFile file(filePath);
-    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
-        return {};
-    }
-
-    const QString text = DecodeTextFile(file.readAll());
-    file.close();
-
     QStringList lines = text.split(QRegularExpression(QStringLiteral("\r\n|\n|\r")), Qt::SkipEmptyParts);
     for (QString &line : lines) {
         line = line.trimmed();
@@ -189,11 +182,57 @@ QString ReadInterestingLine(const QString &filePath, bool useLastLine)
         }
     }
     lines.erase(std::remove_if(lines.begin(), lines.end(), [](const QString &line) { return line.trimmed().isEmpty(); }), lines.end());
+    return lines;
+}
+
+QString ReadInterestingLine(const QString &filePath, bool useLastLine)
+{
+    QFile file(filePath);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+
+    const QStringList lines = NonEmptyTrimmedLines(DecodeTextFile(file.readAll()));
+    file.close();
     if (lines.isEmpty()) {
         return {};
     }
 
     return useLastLine ? lines.constLast() : lines.constFirst();
+}
+
+bool RemoveLastNonEmptyLineFromTextFile(const QString &filePath)
+{
+    QFile file(filePath);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QByteArray data = file.readAll();
+    file.close();
+
+    QStringList lines = NonEmptyTrimmedLines(DecodeTextFile(data));
+    if (lines.isEmpty()) {
+        return false;
+    }
+    lines.removeLast();
+
+    QString newContent = lines.join(QStringLiteral("\r\n"));
+    if (!lines.isEmpty()) {
+        newContent.append(QStringLiteral("\r\n"));
+    }
+
+    QByteArray out;
+    if (data.startsWith(QByteArray::fromHex("EFBBBF"))) {
+        out.append(QByteArray::fromHex("EFBBBF"));
+    }
+    out.append(newContent.toUtf8());
+
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    const qint64 written = file.write(out);
+    file.close();
+    return written == out.size();
 }
 
 bool UseLastLine(WatchKind kind)
@@ -267,7 +306,7 @@ bool PublishJson(bool (*publishFunc)(const AppConfigValues &, const QString &, Q
         return false;
     }
 
-    AppLogger::WriteLog(successMessage);
+    (void)successMessage;
     return true;
 }
 
@@ -361,8 +400,6 @@ void RegisterDirectory(const QString &directoryPath, WatchKind kind)
         state.watcher.addPath(normalizedPath);
     }
     ScanDirectory(normalizedPath, kind, true);
-    AppLogger::WriteLog(QStringLiteral("文件监控已注册目录：[%1] %2")
-                            .arg(WatchKindName(kind), QDir::toNativeSeparators(normalizedPath)));
 }
 
 void RegisterFixedFile(const QString &filePath, WatchKind kind)
@@ -373,8 +410,6 @@ void RegisterFixedFile(const QString &filePath, WatchKind kind)
         return;
     }
     TrackFile(normalizedPath, kind, true);
-    AppLogger::WriteLog(QStringLiteral("文件监控已注册文件：[%1] %2")
-                            .arg(WatchKindName(kind), QDir::toNativeSeparators(normalizedPath)));
 }
 
 bool DeduplicateLine(const QString &filePath, const QString &line)
@@ -382,7 +417,6 @@ bool DeduplicateLine(const QString &filePath, const QString &line)
     auto &state = State();
     const QString normalizedPath = QDir::fromNativeSeparators(filePath);
     if (state.lastProcessedLine.value(normalizedPath) == line) {
-        AppLogger::WriteLog(QStringLiteral("文件监控跳过重复内容：%1").arg(QDir::toNativeSeparators(normalizedPath)));
         return false;
     }
     state.lastProcessedLine.insert(normalizedPath, line);
@@ -399,8 +433,6 @@ bool IsSuppressedPath(const QString &filePath)
     }
 
     if (QDateTime::currentDateTime() <= it.value()) {
-        AppLogger::WriteLog(QStringLiteral("文件监控跳过网关自身写入的文件变化：%1")
-                                .arg(QDir::toNativeSeparators(normalizedPath)));
         return true;
     }
 
@@ -469,18 +501,24 @@ void HandleGameScanFile(const QString &filePath)
     const QString backPath = QDir(rootPath).filePath(QStringLiteral("平台验证/充值二维码/充值图片/%1_%2.txt").arg(partitionIdText, account));
 
     const auto config = AppConfig::Load();
+    double amount = ReadFlexibleDouble(values.value(QStringLiteral("金额")));
+    if (!std::isfinite(amount)) {
+        amount = 0;
+    }
     QJsonObject payload;
     payload.insert(QStringLiteral("PlayerRoleName"), values.value(QStringLiteral("角色名")).trimmed());
     payload.insert(QStringLiteral("PartitionName"), values.value(QStringLiteral("区名")).trimmed());
     payload.insert(QStringLiteral("PlayerAccount"), account);
-    payload.insert(QStringLiteral("Amount"), ReadFlexibleDouble(values.value(QStringLiteral("金额"))));
+    payload.insert(QStringLiteral("Amount"), amount);
     payload.insert(QStringLiteral("PlayerIp"), values.value(QStringLiteral("支付IP")).trimmed());
     payload.insert(QStringLiteral("SecretKey"), config.secretKey);
     payload.insert(QStringLiteral("MachineCode"), State().machineCode);
-    payload.insert(QStringLiteral("TemplatesType"), 2);
+    // 与老网关 FileMonitor / Tenant 热血传奇(CQ) 约定一致：TemplatesType.Rxcq == 1
+    payload.insert(QStringLiteral("TemplatesType"), 1);
     payload.insert(QStringLiteral("Remarks"), backPath);
     payload.insert(QStringLiteral("PartitionId"), ReadFlexibleInt(partitionIdText));
     payload.insert(QStringLiteral("ProductId"), ReadFlexibleInt(values.value(QStringLiteral("支付方式"))));
+    payload.insert(QStringLiteral("CzType"), values.value(QStringLiteral("充值类型")).trimmed());
     payload.insert(QStringLiteral("IsMobile"), true);
 
     PublishJson(&RabbitMqService::YouXiSaomaProcess,
@@ -497,8 +535,6 @@ void HandleWxValidSubmitFile(const QString &filePath)
     }
 
     if (IsTemplatePlaceholderLine(text)) {
-        AppLogger::WriteLog(QStringLiteral("微信密保提交数据检测到安装模板占位内容，跳过：%1 => %2")
-                                .arg(QDir::toNativeSeparators(filePath), text));
         return;
     }
 
@@ -557,8 +593,6 @@ void HandleTransferSubmitFile(const QString &filePath)
     }
 
     if (IsTemplatePlaceholderLine(text)) {
-        AppLogger::WriteLog(QStringLiteral("微信转区提交数据检测到安装模板占位内容，跳过：%1 => %2")
-                                .arg(QDir::toNativeSeparators(filePath), text));
         return;
     }
 
@@ -629,14 +663,23 @@ void HandleRechargeResultFile(const QString &filePath, bool ptResult)
     payload.insert(QStringLiteral("Ip"), match.captured(QStringLiteral("ip")).trimmed());
     payload.insert(QStringLiteral("Amount"), ReadFlexibleDouble(match.captured(QStringLiteral("amount")).trimmed()));
     payload.insert(QStringLiteral("PartitionId"), ReadFlexibleInt(match.captured(QStringLiteral("partitionId")).trimmed()));
+    payload.insert(QStringLiteral("Raw"), text.trimmed());
     payload.insert(QStringLiteral("MachineCode"), State().machineCode);
     payload.insert(QStringLiteral("SecretKey"), AppConfig::Load().secretKey);
     payload.insert(QStringLiteral("CreateTime"), CurrentTimestamp());
 
-    PublishJson(ptResult ? &RabbitMqService::RanchPTResult : &RabbitMqService::RanchResult,
-                payload,
-                QStringLiteral("已发送充值结果：%1").arg(text),
-                QStringLiteral("发送充值结果失败"));
+    const QString normalizedPath = QDir::fromNativeSeparators(filePath);
+    if (!PublishJson(ptResult ? &RabbitMqService::RanchPTResult : &RabbitMqService::RanchResult,
+                     payload,
+                     QStringLiteral("已发送充值结果：%1").arg(text),
+                     QStringLiteral("发送充值结果失败"))) {
+        return;
+    }
+
+    if (!RemoveLastNonEmptyLineFromTextFile(normalizedPath)) {
+        AppLogger::WriteLog(QStringLiteral("充值结果已发出但未能从文件删除已发送行（可能被占用）：%1").arg(QDir::toNativeSeparators(normalizedPath)));
+    }
+    State().lastProcessedLine.insert(normalizedPath, ReadInterestingLine(normalizedPath, true));
 }
 
 bool ParseAuthFileInfo(const QString &filePath,
@@ -690,15 +733,30 @@ void HandleWxValidAuthFile(const QString &filePath)
     const QString directoryPath = QFileInfo(filePath).absolutePath();
     const QString openIdPath = QDir(directoryPath).filePath(QStringLiteral("%1_%2_WXID.txt").arg(partitionId, playerName));
     const QString nickNamePath = QDir(directoryPath).filePath(QStringLiteral("%1_%2_WXNC.txt").arg(partitionId, playerName));
+    AppLogger::WriteLog(QStringLiteral(
+        "微信密保认证数据：触发文件=%1 解析 partitionId=%2 playerName=%3 suffix=%4 配对 WXID=%5 WXNC=%6")
+                            .arg(QDir::toNativeSeparators(filePath),
+                                 partitionId,
+                                 playerName,
+                                 suffix,
+                                 QDir::toNativeSeparators(openIdPath),
+                                 QDir::toNativeSeparators(nickNamePath)));
     const QString openId = ReadInterestingLine(openIdPath, false).trimmed();
     const QString nickName = ReadInterestingLine(nickNamePath, false).trimmed();
     if (openId.isEmpty() || nickName.isEmpty()) {
-        AppLogger::WriteLog(QStringLiteral("微信密保认证数据等待配对文件：%1").arg(QDir::toNativeSeparators(filePath)));
+        AppLogger::WriteLog(QStringLiteral(
+            "微信密保认证数据：配对文件内容未就绪，跳过上报 openIdEmpty=%1 nickEmpty=%2（WXID=%3 WXNC=%4）")
+                                .arg(openId.isEmpty() ? QStringLiteral("1") : QStringLiteral("0"))
+                                .arg(nickName.isEmpty() ? QStringLiteral("1") : QStringLiteral("0"))
+                                .arg(QDir::toNativeSeparators(openIdPath))
+                                .arg(QDir::toNativeSeparators(nickNamePath)));
         return;
     }
 
     if (nickName == partitionId) {
-        AppLogger::WriteLog(QStringLiteral("微信密保认证数据疑似网关自身生成，跳过：%1").arg(QDir::toNativeSeparators(filePath)));
+        AppLogger::WriteLog(QStringLiteral(
+            "微信密保认证数据：WXNC 内容与分区 Id 相同，视为未绑定昵称，跳过上报 partitionId=%1 playerName=%2")
+                                .arg(partitionId, playerName));
         return;
     }
 
@@ -731,8 +789,6 @@ void HandleTransferResultFile(const QString &filePath, WatchKind kind)
     }
 
     if (IsTemplatePlaceholderLine(text)) {
-        AppLogger::WriteLog(QStringLiteral("%1检测到安装模板占位内容，跳过：%2 => %3")
-                                .arg(WatchKindName(kind), QDir::toNativeSeparators(filePath), text));
         return;
     }
 
@@ -817,15 +873,11 @@ void InitializeConnections()
     auto &state = State();
     QObject::connect(&state.watcher, &QFileSystemWatcher::directoryChanged, &state.watcher, [](const QString &path) {
         const auto kind = State().directoryKinds.value(QDir::fromNativeSeparators(path), WatchKind::GameScanDirectory);
-        AppLogger::WriteLog(QStringLiteral("文件监控检测到目录变化：[%1] %2")
-                                .arg(WatchKindName(kind), QDir::toNativeSeparators(path)));
         ScanDirectory(path, kind, false);
     });
     QObject::connect(&state.watcher, &QFileSystemWatcher::fileChanged, &state.watcher, [](const QString &path) {
         const QString normalizedPath = QDir::fromNativeSeparators(path);
         const auto kind = State().fileKinds.value(normalizedPath, WatchKind::PaidFile);
-        AppLogger::WriteLog(QStringLiteral("文件监控检测到文件变化：[%1] %2")
-                                .arg(WatchKindName(kind), QDir::toNativeSeparators(normalizedPath)));
         if (QFileInfo::exists(normalizedPath) && !State().watcher.files().contains(normalizedPath)) {
             State().watcher.addPath(normalizedPath);
         }
@@ -849,22 +901,11 @@ FileMonitorService::FileMonitorService()
 void FileMonitorService::Initialize(const AppConfigValues &config)
 {
     Stop();
+    State().machineCode = MachineCode().GetRNum().trimmed();
 
     const QStringList scanRoots = ResolveRootPaths(config.yxsmDir);
     const QStringList wxRoots = ResolveRootPaths(config.wxValidPath);
     const QStringList effectiveRechargeRoots = MergeRootPaths(scanRoots, wxRoots);
-
-    AppLogger::WriteLog(QStringLiteral("文件监控初始化配置：IsSm=%1, IsWeixinMb=%2, IsWeixinZq=%3, YxsmDir=%4, WxValidPath=%5, PaidDir=%6")
-                            .arg(config.isSm ? QStringLiteral("true") : QStringLiteral("false"),
-                                 config.isWeixinMb ? QStringLiteral("true") : QStringLiteral("false"),
-                                 config.isWeixinZq ? QStringLiteral("true") : QStringLiteral("false"),
-                                 config.yxsmDir,
-                                 config.wxValidPath,
-                                 config.paidDir));
-    AppLogger::WriteLog(QStringLiteral("文件监控解析根路径：扫码=%1，微信=%2，充值=%3")
-                            .arg(scanRoots.join(QStringLiteral("|")),
-                                 wxRoots.join(QStringLiteral("|")),
-                                 effectiveRechargeRoots.join(QStringLiteral("|"))));
 
     auto registerScanRoots = [&](const QStringList &roots) {
         for (const auto &root : roots) {
@@ -924,7 +965,6 @@ void FileMonitorService::Initialize(const AppConfigValues &config)
     }
 
     State().initialized = true;
-    AppLogger::WriteLog(QStringLiteral("文件监控已初始化"));
 }
 
 void FileMonitorService::Stop()

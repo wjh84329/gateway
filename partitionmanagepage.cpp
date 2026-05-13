@@ -3,6 +3,7 @@
 
 #include "applogger.h"
 #include "gatewayapiclient.h"
+#include "partitionpathcache.h"
 #include "pageutils.h"
 #include "partitiondialog.h"
 
@@ -36,6 +37,26 @@ QJsonObject ReadObjectField(const QJsonObject &object, const QStringList &names)
     }
     return {};
 }
+
+/// TenantServer InstallClientPartition 在 HTTP 200 下返回的纯文本成功消息（与 ClientController 一致）
+bool IsInstallClientPartitionHttpBodySuccess(const QString &responseBody)
+{
+    const QString t = responseBody.trimmed();
+    if (t.isEmpty()) {
+        return false;
+    }
+    static const QStringList kOkMessages = {
+        QStringLiteral("安装分区成功"),
+        QStringLiteral("安装成功"),
+        QStringLiteral("定时安装分区指令发送成功"),
+    };
+    for (const auto &s : kOkMessages) {
+        if (t.compare(s, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
 }
 
 PartitionManagePage::PartitionManagePage(QWidget *parent)
@@ -47,21 +68,24 @@ PartitionManagePage::PartitionManagePage(QWidget *parent)
     // ----- 左侧按钮 -----
     ui->addPartitionButton->setProperty("partitionAction", true);
     ui->addPartitionButton->setFixedSize(100, 30);
+    ui->editPartitionButton->setProperty("partitionAction", true);
+    ui->editPartitionButton->setFixedSize(100, 30);
     ui->refreshPartitionButton->setProperty("partitionAction", true);
     ui->refreshPartitionButton->setFixedSize(100, 30);
     connect(ui->refreshPartitionButton, &QPushButton::clicked, this, &PartitionManagePage::LoadPartitions);
     connect(ui->addPartitionButton, &QPushButton::clicked, this, &PartitionManagePage::OnAddPartition);
+    connect(ui->editPartitionButton, &QPushButton::clicked, this, &PartitionManagePage::OnEditPartition);
 
     // ----- 右侧操作按钮 -----
     const QString rightBtnStyle = QStringLiteral(
         "QPushButton { background: #f5edef; color: #8b4a53; border: 1px solid #dccbce; border-radius: 6px; "
-        "font-size: 13px; font-weight: 600; padding: 8px 16px; min-height: 36px; }"
+        "font-size: 13px; font-weight: normal; padding: 8px 16px; min-height: 36px; }"
         "QPushButton:hover { background: #efe4e7; }"
         "QPushButton:disabled { background: #f8f3f3; color: #c0b0b0; border-color: #e5dbdb; }");
 
     const QString deleteBtnStyle = QStringLiteral(
         "QPushButton { color: #ffffff; background: #cf5b5b; border: none; border-radius: 6px; "
-        "font-size: 13px; font-weight: 600; padding: 8px 16px; min-height: 36px; }"
+        "font-size: 13px; font-weight: normal; padding: 8px 16px; min-height: 36px; }"
         "QPushButton:hover { background: #c14848; }"
         "QPushButton:disabled { background: #e8bbbb; color: #f5e0e0; }");
 
@@ -108,7 +132,17 @@ PartitionManagePage::PartitionManagePage(QWidget *parent)
     connect(ui->partitionTable, &QWidget::customContextMenuRequested, this, &PartitionManagePage::OnContextMenu);
 
     // 双击编辑
-    connect(ui->partitionTable, &QTableWidget::cellDoubleClicked, this, &PartitionManagePage::OnEditPartition);
+    connect(ui->partitionTable, &QTableWidget::cellDoubleClicked, this, [this](int row, int column) {
+        Q_UNUSED(column);
+        if (row >= 0)
+            ui->partitionTable->selectRow(row);
+        OnEditPartition();
+    });
+
+    connect(ui->partitionTable, &QTableWidget::itemSelectionChanged, this, [this]() {
+        ui->editPartitionButton->setEnabled(ui->partitionTable->currentRow() >= 0);
+    });
+    ui->editPartitionButton->setEnabled(false);
 
     // 表格视觉样式
     UiHelpers::ConfigureReadonlyTable(ui->partitionTable);
@@ -126,7 +160,7 @@ PartitionManagePage::PartitionManagePage(QWidget *parent)
         "QTableWidget { background: #ffffff; border: 1px solid #e0d0d0; border-radius: 6px; "
         "gridline-color: #f0e8ea; font-size: 13px; }"
         "QTableWidget::item { padding: 4px 8px; }"
-        "QHeaderView::section { background: #f5edef; color: #5f5053; font-weight: 600; border: none; padding: 8px; font-size: 13px; }"
+        "QHeaderView::section { background: #f5edef; color: #5f5053; font-weight: normal; border: none; padding: 8px; font-size: 13px; }"
         "QTableWidget::item:selected { background: #f0e4e6; color: #4a3d3f; }"));
 
     // 分割器
@@ -154,6 +188,7 @@ void PartitionManagePage::LoadPartitions()
     ui->partitionTable->setRowCount(0);
 
     if (m_partitions.isEmpty()) {
+        PartitionPathCache::UpdateFromPartitionsArray(m_partitions);
         if (!errorMessage.isEmpty()) {
             AppLogger::WriteLog(QStringLiteral("加载分区列表失败：%1").arg(errorMessage));
             emit statusMessageRequested(QStringLiteral("加载分区列表失败"), 3000);
@@ -190,8 +225,10 @@ void PartitionManagePage::LoadPartitions()
     }
 
     UiHelpers::CenterTableItems(ui->partitionTable);
+    PartitionPathCache::UpdateFromPartitionsArray(m_partitions);
     emit statusMessageRequested(QStringLiteral("分区列表已刷新"), 3000);
     ui->refreshPartitionButton->setEnabled(true);
+    ui->editPartitionButton->setEnabled(ui->partitionTable->currentRow() >= 0);
     UiHelpers::SetPageLoading(this, false);
 }
 
@@ -236,6 +273,7 @@ void PartitionManagePage::OnAddPartition()
     LoadTemplatesAndGroups();
 
     PartitionDialog dialog(QJsonObject(), m_templates, m_groups, this);
+    UiHelpers::CenterDialogOnWindow(&dialog, this);
     if (dialog.exec() != QDialog::Accepted) return;
 
     GatewayApiClient client;
@@ -248,27 +286,28 @@ void PartitionManagePage::OnAddPartition()
     const QString result = client.InstallClientPartition(body, &errorMessage);
     UiHelpers::SetPageLoading(this, false);
 
-    if (!result.isEmpty()
-        && !errorMessage.isEmpty()
-        && result == errorMessage) {
+    if (result.isEmpty() && !errorMessage.isEmpty()) {
         UiHelpers::ShowStyledMessageBox(this, QMessageBox::Warning,
                                         QStringLiteral("添加失败"), errorMessage);
         emit statusMessageRequested(QStringLiteral("添加分区失败"), 3000);
-    } else if (result.contains(QStringLiteral("成功"))
-               || result.contains(QStringLiteral("安装成功"))) {
-        UiHelpers::ShowOverlayMessage(this, QMessageBox::Information,
-                                      QStringLiteral("添加分区成功"));
+        return;
+    }
+
+    if (IsInstallClientPartitionHttpBodySuccess(result)) {
+        const QString overlay = result.contains(QStringLiteral("定时"))
+                                    ? QStringLiteral("定时安装分区指令已发送")
+                                    : QStringLiteral("添加分区成功");
+        UiHelpers::ShowOverlayMessage(this, QMessageBox::Information, overlay);
         emit statusMessageRequested(QStringLiteral("分区添加成功"), 3000);
         LoadPartitions();
-    } else {
-        UiHelpers::ShowStyledMessageBox(this,
-                                         result.contains(QStringLiteral("成功")) ? QMessageBox::Information : QMessageBox::Warning,
-                                         QStringLiteral("添加分区"), result);
-        emit statusMessageRequested(QStringLiteral("添加分区：%1").arg(result), 3000);
-        if (result.contains(QStringLiteral("成功")) || result.contains(QStringLiteral("安装成功"))) {
-            LoadPartitions();
-        }
+        return;
     }
+
+    const QString detail = !result.isEmpty() ? result : errorMessage;
+    UiHelpers::ShowStyledMessageBox(this, QMessageBox::Warning,
+                                    QStringLiteral("添加分区"),
+                                    detail.isEmpty() ? QStringLiteral("未知错误") : detail);
+    emit statusMessageRequested(QStringLiteral("添加分区失败"), 3000);
 }
 
 void PartitionManagePage::OnEditPartition()
@@ -283,6 +322,7 @@ void PartitionManagePage::OnEditPartition()
     LoadTemplatesAndGroups();
 
     PartitionDialog dialog(partitionObj, m_templates, m_groups, this);
+    UiHelpers::CenterDialogOnWindow(&dialog, this);
     if (dialog.exec() != QDialog::Accepted) return;
 
     GatewayApiClient client;

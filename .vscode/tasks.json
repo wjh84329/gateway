@@ -33,6 +33,44 @@
         "reveal": "always",
         "panel": "shared"
       }
+    },
+    {
+      "label": "gateway-rebuild-static-release",
+      "type": "process",
+      "command": "C:\\Windows\\System32\\cmd.exe",
+      "args": [
+        "/c",
+        "${workspaceFolder}\\scripts\\rebuild_gateway_static_release.bat"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "gateway-rebuild-static-release-qt5",
+      "type": "process",
+      "command": "C:\\Windows\\System32\\cmd.exe",
+      "args": [
+        "/c",
+        "${workspaceFolder}\\scripts\\rebuild_gateway_static_release_qt5.bat"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "focus": true
+      },
+      "problemMatcher": []
     }
   ]
 }

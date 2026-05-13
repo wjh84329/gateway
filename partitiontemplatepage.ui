@@ -12,6 +12,8 @@
     <layout class="QHBoxLayout" name="actionLayout">
      <property name="spacing"><number>14</number></property>
      <item><widget class="QPushButton" name="addTemplateButton"><property name="text"><string>添加模板</string></property></widget></item>
+     <item><widget class="QPushButton" name="editTemplateButton"><property name="text"><string>编辑模板</string></property></widget></item>
+     <item><widget class="QPushButton" name="deleteTemplateButton"><property name="text"><string>删除模板</string></property></widget></item>
      <item><widget class="QPushButton" name="refreshTemplateButton"><property name="text"><string>刷新模板</string></property></widget></item>
      <item><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
     </layout>

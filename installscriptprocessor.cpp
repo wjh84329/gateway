@@ -1,16 +1,19 @@
 #include "installscriptprocessor.h"
 
-#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
+#include <QRegularExpression>
 #include <QVector>
 
 #include "appconfig.h"
 #include "filemonitorservice.h"
+#include "gatewayapiclient.h"
 
 #include <climits>
 
@@ -18,9 +21,36 @@ namespace {
 struct InstallContext
 {
     bool isTongQu = false;
+    /// 与 TenantServer / 老网关 ProcessInstall：通区第二次写入时 type==2 仅当模板为测试区
+    bool isTest = false;
     int isDir = 0;
     QString tongQuDir;
     int buildType = 0;
+};
+
+thread_local const QHash<QString, QString> *g_remoteInstallScriptTexts = nullptr;
+thread_local const QHash<QString, QString> *g_partitionInstallOutputOverrides = nullptr;
+
+struct RemoteInstallScriptTextsScope
+{
+    const QHash<QString, QString> *previous = nullptr;
+    explicit RemoteInstallScriptTextsScope(const QHash<QString, QString> *map)
+        : previous(g_remoteInstallScriptTexts)
+    {
+        g_remoteInstallScriptTexts = map;
+    }
+    ~RemoteInstallScriptTextsScope() { g_remoteInstallScriptTexts = previous; }
+};
+
+struct PartitionOutputOverridesScope
+{
+    const QHash<QString, QString> *previous = nullptr;
+    explicit PartitionOutputOverridesScope(const QHash<QString, QString> *map)
+        : previous(g_partitionInstallOutputOverrides)
+    {
+        g_partitionInstallOutputOverrides = map;
+    }
+    ~PartitionOutputOverridesScope() { g_partitionInstallOutputOverrides = previous; }
 };
 
 QJsonObject ReadObjectField(const QJsonObject &object, const QStringList &names)
@@ -78,6 +108,43 @@ int ReadIntField(const QJsonObject &object, const QStringList &names, int defaul
     return defaultValue;
 }
 
+/// InstallScript 消息里 Partition.Id、TemplateId 等常为 JSON 数字；ReadStringField 对非字符串会得到空，
+/// 导致 %AreaID%、%TemplateID% 等占位符未被替换（商户端预览走 C# 强类型无此问题）。
+QString ReadJsonScalarAsString(const QJsonObject &object, const QStringList &names)
+{
+    const QString s = ReadStringField(object, names);
+    if (!s.isEmpty()) {
+        return s;
+    }
+    const int n = ReadIntField(object, names, 0);
+    return n != 0 ? QString::number(n) : QString();
+}
+
+/// 模板「充值 NPC」等在网关保存为 JSON 数字（Map/Looks/X/Y）；ReadStringField 读不到，Merchant.txt 会全写成 0。
+/// 与 ReadJsonScalarAsString 不同：键存在且数值为 0 时仍输出 "0"（地图号、坐标可能为 0）。
+QString ReadJsonMerchantScalarAsString(const QJsonObject &object, const QStringList &names)
+{
+    for (const auto &name : names) {
+        if (!object.contains(name)) {
+            continue;
+        }
+        const QJsonValue value = object.value(name);
+        if (value.isNull() || value.isUndefined()) {
+            continue;
+        }
+        if (value.isString()) {
+            return value.toString().trimmed();
+        }
+        if (value.isDouble()) {
+            return QString::number(value.toInt());
+        }
+        if (value.isBool()) {
+            return value.toBool() ? QStringLiteral("1") : QStringLiteral("0");
+        }
+    }
+    return {};
+}
+
 bool ReadBoolField(const QJsonObject &object, const QStringList &names, bool defaultValue = false)
 {
     for (const auto &name : names) {
@@ -121,6 +188,63 @@ double ReadDoubleField(const QJsonObject &object, const QStringList &names, doub
     return defaultValue;
 }
 
+/// 网页通道 Port 在 JSON 中常为数字；为空时老逻辑默认 80，但 https 域名应对齐 443（与商户端预览一致）。
+QString ResolveWebCircuitPort(const QString &domainName, const QString &portText)
+{
+    if (!portText.isEmpty()) {
+        return portText;
+    }
+    const QString lower = domainName.trimmed().toLower();
+    if (lower.startsWith(QLatin1String("https://"))) {
+        return QStringLiteral("443");
+    }
+    return QStringLiteral("80");
+}
+
+/// 扫码相关数值占位符仅以 Scan 为准，不用 Template 回退。
+double ReadScanOrTemplateDouble(const QJsonObject &scanObject,
+                                const QJsonObject &templateObject,
+                                const QStringList &names,
+                                double templateFallback = 0.0)
+{
+    Q_UNUSED(templateObject);
+    Q_UNUSED(templateFallback);
+    for (const auto &name : names) {
+        if (scanObject.contains(name)) {
+            return ReadDoubleField(scanObject, {name}, 0.0);
+        }
+    }
+    return 0.0;
+}
+
+/// ResourceCode / ImageCode：仅使用 scan（含数字）；缺失则为空，不回退 template。
+QString ReadScanOrTemplateResourceText(const QJsonObject &scanObject,
+                                       const QJsonObject &templateObject,
+                                       const QStringList &names)
+{
+    Q_UNUSED(templateObject);
+    for (const auto &name : names) {
+        if (!scanObject.contains(name)) {
+            continue;
+        }
+        const QJsonValue v = scanObject.value(name);
+        if (v.isNull() || v.isUndefined()) {
+            continue;
+        }
+        if (v.isString()) {
+            return v.toString().trimmed();
+        }
+        if (v.isDouble()) {
+            return QString::number(v.toInt());
+        }
+        if (v.isBool()) {
+            return v.toBool() ? QStringLiteral("1") : QStringLiteral("0");
+        }
+        return {};
+    }
+    return {};
+}
+
 InstallContext ResolveInstallContext(const QJsonObject &dataObject,
                                      const QJsonObject &partitionObject,
                                      const QJsonObject &templateObject)
@@ -151,12 +275,30 @@ InstallContext ResolveInstallContext(const QJsonObject &dataObject,
         return ReadStringField(templateObject, names);
     };
 
-    context.isTongQu = readInt({QStringLiteral("IsTongQu"), QStringLiteral("isTongQu")}, 0) != 0;
+    const auto readBool = [&](const QStringList &names, bool defaultValue) -> bool {
+        for (const QJsonObject *o : {&dataObject, &partitionObject, &templateObject}) {
+            for (const auto &name : names) {
+                if (!o->contains(name)) {
+                    continue;
+                }
+                return ReadBoolField(*o, {name}, defaultValue);
+            }
+        }
+        return defaultValue;
+    };
+    // IsTongQu 在 JSON 中多为布尔；readInt/ReadIntField 不识别 bool，会误判为非通区，导致不通向通区目录生成脚本
+    context.isTongQu = readBool({QStringLiteral("IsTongQu"), QStringLiteral("isTongQu")}, false);
+    if (!context.isTongQu) {
+        context.isTongQu = readInt({QStringLiteral("IsTongQu"), QStringLiteral("isTongQu")}, 0) != 0;
+    }
+    context.isTest = readBool({QStringLiteral("IsTest"), QStringLiteral("isTest")}, false);
+
     context.isDir = readInt({QStringLiteral("IsDir"), QStringLiteral("isDir")}, 0);
     context.tongQuDir = readString({QStringLiteral("TongQuDir"), QStringLiteral("tongQuDir")});
     context.buildType = readInt({QStringLiteral("BuildType"), QStringLiteral("buildType")}, 0);
+    // 老网关 ProcessCq：通区第二次写入时 IsTest→type=2（测试充值+${领取}），否则 type=3（正式）
     if (context.buildType == 0 && context.isTongQu) {
-        context.buildType = 2;
+        context.buildType = context.isTest ? 2 : 3;
     }
 
     return context;
@@ -203,10 +345,7 @@ bool EnsureEmptyFileExists(const QString &filePath, QString *errorMessage)
         return false;
     }
 
-    if (QFile::exists(filePath)) {
-        return true;
-    }
-
+    // 安装脚本每次执行都刷新占位文件；已存在则截断为空，不跳过（与老网关“重装覆盖”预期一致）
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         if (errorMessage) {
@@ -273,11 +412,7 @@ bool WriteTextFile(const QString &filePath, const QString &content, QString *err
 
 bool WriteTextFileIfEmpty(const QString &filePath, const QString &content, QString *errorMessage)
 {
-    QFile file(filePath);
-    if (file.exists() && file.size() > 0) {
-        return true;
-    }
-
+    // 安装脚本不跳过已存在文件：始终按本次生成内容覆盖（函数名保留以减小调用方改动）
     return WriteTextFile(filePath, content, errorMessage);
 }
 
@@ -452,59 +587,6 @@ QString BuildRechargeAmountBridgeScript(const QString &payDir,
                                 actCommands);
 }
 
-QString BuildWxMbSubmitScript(const QString &partitionId,
-                              const QString &payDir,
-                              const QString &submitFileName,
-                              const QString &machineVar,
-                              const QString &openidVar,
-                              const QString &wxVar)
-{
-    QString script = BuildQuestCallScript(QStringLiteral("@认证准备提交"),
-                                          QStringLiteral("提交微信密保认证"),
-                                          {
-                                              QStringLiteral("分区ID：%1").arg(partitionId.isEmpty() ? QStringLiteral("<empty>") : partitionId),
-                                              QStringLiteral("机器码变量：%1").arg(machineVar.isEmpty() ? QStringLiteral("<empty>") : machineVar),
-                                              QStringLiteral("OpenId变量：%1").arg(openidVar.isEmpty() ? QStringLiteral("<empty>") : openidVar),
-                                              QStringLiteral("微信变量：%1").arg(wxVar.isEmpty() ? QStringLiteral("<empty>") : wxVar),
-                                              QStringLiteral("提交文件：%1").arg(submitFileName.isEmpty() ? QStringLiteral("<empty>") : submitFileName)
-                                          },
-                                          {
-                                              QStringLiteral("#CALL [%1] @检测密保")
-                                                  .arg(BuildQuestCallPath(payDir, {QStringLiteral("微信密保"), QStringLiteral("登录检测.txt")})),
-                                              QStringLiteral("MOV S94 %1").arg(submitFileName.isEmpty() ? QStringLiteral("<empty>") : submitFileName),
-                                              QStringLiteral("MOV S96 %1").arg(machineVar.isEmpty() ? QStringLiteral("<empty>") : machineVar),
-                                              QStringLiteral("MOV S97 %1").arg(openidVar.isEmpty() ? QStringLiteral("<empty>") : openidVar),
-                                              QStringLiteral("MOV S98 %1").arg(wxVar.isEmpty() ? QStringLiteral("<empty>") : wxVar),
-                                              QStringLiteral("GOTO @写入认证文件")
-                                          });
-
-    script += QStringLiteral("\r\n");
-    script += BuildQuestCallScript(QStringLiteral("@写入认证文件"),
-                                   QStringLiteral("写入微信密保认证文件"),
-                                   {
-                                       QStringLiteral("提交文件：<$STR(S94)>") ,
-                                       QStringLiteral("机器码变量：<$STR(S96)>") ,
-                                       QStringLiteral("OpenId变量：<$STR(S97)>") ,
-                                       QStringLiteral("微信变量：<$STR(S98)>")
-                                   },
-                                   {
-                                       QStringLiteral("SENDMSG 6 微信密保认证数据已写入提交队列"),
-                                       QStringLiteral("GOTO @完成认证提交")
-                                   });
-
-    script += QStringLiteral("\r\n");
-    script += BuildQuestCallScript(QStringLiteral("@完成认证提交"),
-                                   QStringLiteral("完成微信密保认证提交"),
-                                   {
-                                       QStringLiteral("提交文件：<$STR(S94)>") ,
-                                       QStringLiteral("认证数据已准备完成")
-                                   },
-                                   {
-                                       QStringLiteral("SENDMSG 6 微信密保认证数据已准备，请检查提交文件")
-                                   });
-    return script;
-}
-
 QString BuildTransferSubmitScript(const QString &partitionId,
                                   const QString &queryFileName,
                                   const QString &deductFileName,
@@ -601,7 +683,7 @@ QString BuildWebRechargeScript(const QString &browserCommand,
         const QJsonObject circuitObject = circuitValue.toObject();
         const QString circuitName = ReadStringField(circuitObject, {QStringLiteral("Name"), QStringLiteral("name")});
         const QString domainName = ReadStringField(circuitObject, {QStringLiteral("DomainName"), QStringLiteral("domainName")});
-        const QString port = ReadStringField(circuitObject, {QStringLiteral("Port"), QStringLiteral("port")});
+        const QString portRaw = ReadJsonScalarAsString(circuitObject, {QStringLiteral("Port"), QStringLiteral("port")});
         if (circuitName.isEmpty()) {
             continue;
         }
@@ -612,12 +694,12 @@ QString BuildWebRechargeScript(const QString &browserCommand,
         QStringList actCommands;
         actCommands << QStringLiteral("MOV S84 %1").arg(circuitName);
         actCommands << QStringLiteral("MOV S85 %1").arg(domainName.isEmpty() ? QStringLiteral("<empty>") : domainName);
-        actCommands << QStringLiteral("MOV S86 %1").arg(port.isEmpty() ? QStringLiteral("<empty>") : port);
+        actCommands << QStringLiteral("MOV S86 %1").arg(portRaw.isEmpty() ? QStringLiteral("<empty>") : portRaw);
         actCommands << QStringLiteral("MOV S87 %1").arg(partitionUuid.isEmpty() ? QStringLiteral("<empty>") : partitionUuid);
         if (!browserCommand.isEmpty() && !domainName.isEmpty() && !partitionUuid.isEmpty()) {
-            const QString rechargeUrl = port.isEmpty()
+            const QString rechargeUrl = portRaw.isEmpty()
                                             ? QStringLiteral("%1/Default/Partition/%2").arg(domainName, partitionUuid)
-                                            : QStringLiteral("%1:%2/Default/Partition/%3").arg(domainName, port, partitionUuid);
+                                            : QStringLiteral("%1:%2/Default/Partition/%3").arg(domainName, portRaw, partitionUuid);
             actCommands << QStringLiteral("MOV S88 %1").arg(rechargeUrl);
             actCommands << QStringLiteral("%1 %2").arg(browserCommand, rechargeUrl);
         } else {
@@ -630,7 +712,7 @@ QString BuildWebRechargeScript(const QString &browserCommand,
                                          {
                                              QStringLiteral("通道名称：%1").arg(circuitName),
                                              QStringLiteral("域名：%1").arg(domainName.isEmpty() ? QStringLiteral("<empty>") : domainName),
-                                             QStringLiteral("端口：%1").arg(port.isEmpty() ? QStringLiteral("<empty>") : port),
+                                             QStringLiteral("端口：%1").arg(portRaw.isEmpty() ? QStringLiteral("<empty>") : portRaw),
                                              QStringLiteral("分区标识：%1").arg(partitionUuid.isEmpty() ? QStringLiteral("<empty>") : partitionUuid)
                                          },
                                          actCommands);
@@ -876,85 +958,87 @@ QString ReadExistingTextFile(const QString &filePath)
     return QString::fromLocal8Bit(file.readAll());
 }
 
-QString TemplateRootPath()
+QString JsonObjectStringRaw(const QJsonObject &object, const QStringList &keys)
 {
-    return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("模板"));
-}
-
-QString ResolveEngineTemplateDirectory(const QString &gameEngine)
-{
-    const QString engine = gameEngine.trimmed();
-    if (engine.contains(QStringLiteral("996M2"), Qt::CaseInsensitive)) {
-        return QStringLiteral("996M2脚本");
+    for (const auto &key : keys) {
+        const QJsonValue value = object.value(key);
+        if (value.isString()) {
+            return value.toString();
+        }
     }
-    if (engine.contains(QStringLiteral("BLUE"), Qt::CaseInsensitive)) {
-        return QStringLiteral("BLUE脚本");
-    }
-    if (engine.contains(QStringLiteral("GEE"), Qt::CaseInsensitive)
-        || engine.contains(QStringLiteral("翎风"), Qt::CaseInsensitive)
-        || engine.contains(QStringLiteral("LF"), Qt::CaseInsensitive)) {
-        return QStringLiteral("GEE脚本");
-    }
-    if (engine.compare(QStringLiteral("GOM"), Qt::CaseInsensitive) == 0
-        || (engine.contains(QStringLiteral("GOM"), Qt::CaseInsensitive)
-            && !engine.contains(QStringLiteral("新GOM"), Qt::CaseInsensitive))) {
-        return QStringLiteral("GOM脚本");
-    }
-    if (engine.contains(QStringLiteral("HGE"), Qt::CaseInsensitive)) {
-        return QStringLiteral("HGE脚本");
-    }
-    if (engine.contains(QStringLiteral("新GOM"), Qt::CaseInsensitive)) {
-        return QStringLiteral("NEWGOM脚本");
-    }
-    if (engine.contains(QStringLiteral("OTHER"), Qt::CaseInsensitive)
-        || engine.contains(QStringLiteral("其他"), Qt::CaseInsensitive)
-        || engine.contains(QStringLiteral("Herom2"), Qt::CaseInsensitive)) {
-        return QStringLiteral("OTHER脚本");
-    }
-    if (engine.contains(QStringLiteral("WOOOL"), Qt::CaseInsensitive)) {
-        return QStringLiteral("WOOOL脚本");
-    }
-
     return {};
 }
 
-QString ResolveTemplateFilePath(const QJsonObject &templateObject, const QString &fileName)
+bool FetchMergedInstallScriptsFromPlatform(const QJsonObject &templateObject,
+                                             int partitionId,
+                                             QHash<QString, QString> *outMap,
+                                             QHash<QString, QString> *outPartitionOutputOverrides,
+                                             QString *errorMessage)
 {
-    const QString templateRoot = TemplateRootPath();
-    const QString engineDirectory = ResolveEngineTemplateDirectory(ReadStringField(templateObject,
-                                                                                   {QStringLiteral("GameEngine"), QStringLiteral("gameEngine")}));
-    if (!engineDirectory.isEmpty()) {
-        const QString engineFilePath = QDir(QDir(templateRoot).filePath(engineDirectory)).filePath(fileName);
-        if (QFileInfo::exists(engineFilePath)) {
-            return engineFilePath;
-        }
+    outMap->clear();
+    if (outPartitionOutputOverrides) {
+        outPartitionOutputOverrides->clear();
     }
-
-    const QString directFilePath = QDir(templateRoot).filePath(fileName);
-    return QFileInfo::exists(directFilePath) ? directFilePath : QString();
+    const int templateId = ReadIntField(templateObject, {QStringLiteral("Id"), QStringLiteral("id")});
+    const QString gameEngine = ReadStringField(templateObject, {QStringLiteral("GameEngine"), QStringLiteral("gameEngine")});
+    if (templateId <= 0) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("InstallScript 缺少有效模板 Id");
+        }
+        return false;
+    }
+    QString apiError;
+    GatewayApiClient client;
+    const QJsonDocument doc =
+        client.GetClientInstallScriptFiles(templateId, gameEngine, &apiError, partitionId);
+    QString parseErr;
+    if (!GatewayApiClient::ParseGetClientInstallScriptFilesResponse(doc,
+                                                                    outMap,
+                                                                    partitionId > 0 ? outPartitionOutputOverrides : nullptr,
+                                                                    &parseErr)) {
+        if (errorMessage) {
+            *errorMessage = !apiError.isEmpty() ? apiError : parseErr;
+        }
+        return false;
+    }
+    return true;
 }
 
+/// 按合并安装脚本接口返回的 FileName 在内存映射中取值（见 LoadRemoteInstallScriptTexts / g_remoteInstallScriptTexts）。
+/// 不读取网关磁盘上的模板 txt；占位符由 TenantServer 合并渲染。
 QString ReadTemplateText(const QJsonObject &templateObject, const QString &fileName)
 {
-    const QString templateFilePath = ResolveTemplateFilePath(templateObject, fileName);
-    if (templateFilePath.isEmpty()) {
+    Q_UNUSED(templateObject);
+    if (!g_remoteInstallScriptTexts || g_remoteInstallScriptTexts->isEmpty()) {
         return {};
     }
+    for (auto it = g_remoteInstallScriptTexts->constBegin(); it != g_remoteInstallScriptTexts->constEnd(); ++it) {
+        if (it.key().compare(fileName, Qt::CaseInsensitive) == 0) {
+            return it.value();
+        }
+    }
+    return {};
+}
 
-    return ReadExistingTextFile(templateFilePath);
+/// 与合并接口返回的 FileName 一致查找（支持 Market_Def\ 与正斜杠差异）；供创建分区时优先使用平台已渲染的 Market_Def 脚本。
+QString ReadMergedInstallScriptContent(const QString &mapKey)
+{
+    if (!g_remoteInstallScriptTexts || g_remoteInstallScriptTexts->isEmpty() || mapKey.trimmed().isEmpty()) {
+        return {};
+    }
+    const QString normalized = QDir::fromNativeSeparators(mapKey.trimmed());
+    for (auto it = g_remoteInstallScriptTexts->constBegin(); it != g_remoteInstallScriptTexts->constEnd(); ++it) {
+        if (QDir::fromNativeSeparators(it.key()).compare(normalized, Qt::CaseInsensitive) == 0) {
+            return it.value();
+        }
+    }
+    return {};
 }
 
 QString RequireTemplateText(const QJsonObject &templateObject, const QString &fileName, QString *errorMessage)
 {
-    const QString text = ReadTemplateText(templateObject, fileName);
-    if (!text.isEmpty()) {
-        return text;
-    }
-
-    if (errorMessage) {
-        *errorMessage = QStringLiteral("未找到安装脚本模板：%1").arg(fileName);
-    }
-    return {};
+    Q_UNUSED(errorMessage);
+    return ReadTemplateText(templateObject, fileName);
 }
 
 QString RelativePlatformPath()
@@ -966,6 +1050,22 @@ QString NormalizeScriptPath(QString path)
 {
     path = QDir::toNativeSeparators(path);
     return path.replace(QLatin1Char('/'), QLatin1Char('\\'));
+}
+
+QString ReadPartitionOutputOverrideForMarketFile(const QString &fileNameOnly)
+{
+    if (!g_partitionInstallOutputOverrides || g_partitionInstallOutputOverrides->isEmpty() || fileNameOnly.isEmpty()) {
+        return {};
+    }
+    const QString key = QStringLiteral("Market_Def\\") + fileNameOnly;
+    const QString normalizedKey = NormalizeScriptPath(key);
+    for (auto it = g_partitionInstallOutputOverrides->constBegin(); it != g_partitionInstallOutputOverrides->constEnd();
+         ++it) {
+        if (NormalizeScriptPath(it.key()).compare(normalizedKey, Qt::CaseInsensitive) == 0) {
+            return it.value();
+        }
+    }
+    return {};
 }
 
 QString GetExtendedInstruction(const QJsonObject &templateObject)
@@ -1036,6 +1136,63 @@ QString ReplaceSection(const QString &text, const QString &startMarker, const QS
 QString RemoveSection(const QString &text, const QString &startMarker, const QString &endMarker)
 {
     return ReplaceSection(text, startMarker, endMarker, QString());
+}
+
+/// 平台合并的 Market_Def 充值 NPC 可能按旧 Scan 渲染；安装时以当前分区 Scan 再裁剪区块并重写主菜单（与本地 npcTemplateText 分支一致）。
+QString ApplyPartitionScanModeToRechargeNpcScript(const QString &script,
+                                                  int scanMode,
+                                                  bool transferCoinButton)
+{
+    QString out = script;
+    if (scanMode == 0) {
+        out = RemoveSection(out, QStringLiteral(";<!----(网页充值)"), QStringLiteral(";---->"));
+    }
+    if (scanMode == 2) {
+        out = RemoveSection(out, QStringLiteral(";<!----(扫码充值)"), QStringLiteral(";---->"));
+    }
+
+    static const QString kReceive = QStringLiteral("<领取充值/@领取>");
+    static const QString kExit = QStringLiteral("<退出/@exit>");
+    const int recvPos = out.indexOf(kReceive, 0, Qt::CaseSensitive);
+    if (recvPos < 0) {
+        return out;
+    }
+    const int segStart = recvPos + kReceive.size();
+    const int exitPos = out.indexOf(kExit, segStart, Qt::CaseSensitive);
+    if (exitPos < 0) {
+        return out;
+    }
+
+    QString mid;
+    if (scanMode == 0) {
+        mid = QStringLiteral(" ┆ <扫码充值/@扫码充值>");
+    } else if (scanMode == 1) {
+        mid = QStringLiteral("┆ <网页充值/@网页充值> ┆ <扫码充值/@扫码充值>");
+    } else {
+        mid = QStringLiteral(" ┆ <网页充值/@网页充值>");
+    }
+    if (transferCoinButton) {
+        mid += QStringLiteral(" ┆ <游戏币充值/@游戏币充值>");
+    }
+    mid += QStringLiteral("  ┆ ");
+    return out.left(segStart) + mid + out.mid(exitPos);
+}
+
+/// 删除包含指定子串的整行（与 ProcessInstall.RemoveLinesContaining 行为一致，用于积分赠送 Show=2）
+QString RemoveLinesContainingSubstring(const QString &text, const QString &substring)
+{
+    if (text.isEmpty() || substring.isEmpty()) {
+        return text;
+    }
+    const QStringList lines = text.split(QRegularExpression(QStringLiteral("\r\n|\n|\r")), Qt::KeepEmptyParts);
+    QStringList kept;
+    kept.reserve(lines.size());
+    for (const QString &line : lines) {
+        if (!line.contains(substring, Qt::CaseSensitive)) {
+            kept.append(line);
+        }
+    }
+    return kept.join(QStringLiteral("\r\n"));
 }
 
 QString BuildRewardStoragePath(const InstallContext &context,
@@ -1145,17 +1302,22 @@ bool UpdateMerchantInfo(const QString &envirPath,
         const QJsonObject npcObject = npcValue.toObject();
         const QString npcLine = BuildMerchantNpcLine(
             ReadStringField(npcObject, {QStringLiteral("Name"), QStringLiteral("name")}),
-            ReadStringField(npcObject, {QStringLiteral("Map"), QStringLiteral("map")}),
-            ReadStringField(npcObject, {QStringLiteral("XAxis"), QStringLiteral("xAxis"), QStringLiteral("X")}),
-            ReadStringField(npcObject, {QStringLiteral("YAxis"), QStringLiteral("yAxis"), QStringLiteral("Y")}),
-            ReadStringField(npcObject, {QStringLiteral("Looks"), QStringLiteral("looks"), QStringLiteral("LookId")}));
+            ReadJsonMerchantScalarAsString(npcObject, {QStringLiteral("Map"), QStringLiteral("map")}),
+            ReadJsonMerchantScalarAsString(npcObject, {QStringLiteral("XAxis"), QStringLiteral("xAxis"), QStringLiteral("X")}),
+            ReadJsonMerchantScalarAsString(npcObject, {QStringLiteral("YAxis"), QStringLiteral("yAxis"), QStringLiteral("Y")}),
+            ReadJsonMerchantScalarAsString(npcObject, {QStringLiteral("Looks"), QStringLiteral("looks"), QStringLiteral("LookId")}));
         if (!npcLine.isEmpty()) {
             npcLines.append(npcLine);
         }
     }
 
     const QString wxmbNpcName = ReadStringField(wxmbTemplateObject, {QStringLiteral("NpcName"), QStringLiteral("npcName")});
-    const QJsonArray wxmbNpcs = ReadArrayField(wxmbTemplateObject, {QStringLiteral("npcs"), QStringLiteral("Npcs")});
+    // 与库表 WxmbTemplateNpc 一致：MapId/X/Y/LookId；JSON 可能挂在 Npcs 或 WxmbTemplateNpcs 等属性下
+    const QJsonArray wxmbNpcs = ReadArrayField(wxmbTemplateObject,
+                                               {QStringLiteral("Npcs"),
+                                                QStringLiteral("npcs"),
+                                                QStringLiteral("WxmbTemplateNpcs"),
+                                                QStringLiteral("wxmbTemplateNpcs")});
     for (const auto &npcValue : wxmbNpcs) {
         if (!npcValue.isObject()) {
             continue;
@@ -1164,10 +1326,26 @@ bool UpdateMerchantInfo(const QString &envirPath,
         const QJsonObject npcObject = npcValue.toObject();
         const QString npcLine = BuildMerchantNpcLine(
             wxmbNpcName,
-            ReadStringField(npcObject, {QStringLiteral("MapId"), QStringLiteral("mapId")}),
-            ReadStringField(npcObject, {QStringLiteral("X"), QStringLiteral("x")}),
-            ReadStringField(npcObject, {QStringLiteral("Y"), QStringLiteral("y")}),
-            ReadStringField(npcObject, {QStringLiteral("LookId"), QStringLiteral("lookId")}));
+            ReadJsonMerchantScalarAsString(npcObject,
+                                           {QStringLiteral("MapId"),
+                                            QStringLiteral("mapId"),
+                                            QStringLiteral("Map"),
+                                            QStringLiteral("map")}),
+            ReadJsonMerchantScalarAsString(npcObject,
+                                           {QStringLiteral("X"),
+                                            QStringLiteral("x"),
+                                            QStringLiteral("XAxis"),
+                                            QStringLiteral("xAxis")}),
+            ReadJsonMerchantScalarAsString(npcObject,
+                                           {QStringLiteral("Y"),
+                                            QStringLiteral("y"),
+                                            QStringLiteral("YAxis"),
+                                            QStringLiteral("yAxis")}),
+            ReadJsonMerchantScalarAsString(npcObject,
+                                           {QStringLiteral("LookId"),
+                                            QStringLiteral("lookId"),
+                                            QStringLiteral("Looks"),
+                                            QStringLiteral("looks")}));
         if (!npcLine.isEmpty()) {
             npcLines.append(npcLine);
         }
@@ -1183,10 +1361,26 @@ bool UpdateMerchantInfo(const QString &envirPath,
         const QJsonObject npcObject = npcValue.toObject();
         const QString npcLine = BuildMerchantNpcLine(
             transferNpcName,
-            ReadStringField(npcObject, {QStringLiteral("MapId"), QStringLiteral("mapId")}),
-            ReadStringField(npcObject, {QStringLiteral("X"), QStringLiteral("x")}),
-            ReadStringField(npcObject, {QStringLiteral("Y"), QStringLiteral("y")}),
-            ReadStringField(npcObject, {QStringLiteral("LookId"), QStringLiteral("lookId")}));
+            ReadJsonMerchantScalarAsString(npcObject,
+                                           {QStringLiteral("MapId"),
+                                            QStringLiteral("mapId"),
+                                            QStringLiteral("Map"),
+                                            QStringLiteral("map")}),
+            ReadJsonMerchantScalarAsString(npcObject,
+                                           {QStringLiteral("X"),
+                                            QStringLiteral("x"),
+                                            QStringLiteral("XAxis"),
+                                            QStringLiteral("xAxis")}),
+            ReadJsonMerchantScalarAsString(npcObject,
+                                           {QStringLiteral("Y"),
+                                            QStringLiteral("y"),
+                                            QStringLiteral("YAxis"),
+                                            QStringLiteral("yAxis")}),
+            ReadJsonMerchantScalarAsString(npcObject,
+                                           {QStringLiteral("LookId"),
+                                            QStringLiteral("lookId"),
+                                            QStringLiteral("Looks"),
+                                            QStringLiteral("looks")}));
         if (!npcLine.isEmpty()) {
             npcLines.append(npcLine);
         }
@@ -1503,7 +1697,7 @@ bool UpdateMarketDefScripts(const QString &envirPath,
     const QString marketDefPath = QDir(envirPath).filePath(QStringLiteral("Market_Def"));
     const QString currencyName = ReadStringField(templateObject, {QStringLiteral("CurrencyName"), QStringLiteral("currencyName")});
     const QString payDir = ReadStringField(templateObject, {QStringLiteral("PayDir"), QStringLiteral("payDir")});
-    const QString partitionId = ReadStringField(partitionObject, {QStringLiteral("Id"), QStringLiteral("id")});
+    const QString partitionId = ReadJsonScalarAsString(partitionObject, {QStringLiteral("Id"), QStringLiteral("id")});
     const int scanMode = ReadIntField(partitionObject, {QStringLiteral("Scan"), QStringLiteral("scan")});
     const bool wxmbEnabled = ReadIntField(templateObject, {QStringLiteral("IsWxmb"), QStringLiteral("isWxmb")}) != 0;
     const bool transferEnabled = ReadBoolField(wxmbTemplateObject, {QStringLiteral("TransferEnable"), QStringLiteral("transferEnable")});
@@ -1514,26 +1708,35 @@ bool UpdateMarketDefScripts(const QString &envirPath,
     const QString transferRechargeVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferRechargeVar"), QStringLiteral("transferRechargeVar")});
     const QString transferUsedVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferUsedVar"), QStringLiteral("transferUsedVar")});
     const QString transferCoinVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferCoinVar"), QStringLiteral("transferCoinVar")});
-    const QString templateId = ReadStringField(partitionObject, {QStringLiteral("TemplateId"), QStringLiteral("templateId")});
+    const QString templateId = ReadJsonScalarAsString(partitionObject, {QStringLiteral("TemplateId"), QStringLiteral("templateId")});
     const QString partitionUuid = ReadStringField(partitionObject, {QStringLiteral("Uuid"), QStringLiteral("uuid")});
     const QString browserCommand = ReadStringField(templateObject, {QStringLiteral("BrowserCommand"), QStringLiteral("browserCommand")});
     const QJsonArray integralGives = ReadArrayField(templateObject, {QStringLiteral("IntegralGives"), QStringLiteral("integralGives")});
     const QJsonArray additionalGives = ReadArrayField(templateObject, {QStringLiteral("AdditionalGives"), QStringLiteral("additionalGives")});
     const bool hasEquipGive = !ReadArrayField(templateObject, {QStringLiteral("EquipGives"), QStringLiteral("equipGives")}).isEmpty();
-    const QString npcTemplateText = RequireTemplateText(templateObject, QStringLiteral("NPC.txt"), errorMessage);
-    const QString wxmbTemplateText = wxmbEnabled ? RequireTemplateText(templateObject, QStringLiteral("微信密保.txt"), errorMessage) : QString();
-    const QString transferTemplateText = (wxmbEnabled && transferEnabled) ? RequireTemplateText(templateObject, QStringLiteral("自助转区.txt"), errorMessage) : QString();
-    if (npcTemplateText.isEmpty() || (wxmbEnabled && wxmbTemplateText.isEmpty()) || (wxmbEnabled && transferEnabled && transferTemplateText.isEmpty())) {
-        return false;
-    }
+    const QString npcTemplateText = ReadTemplateText(templateObject, QStringLiteral("NPC.txt"));
+    const QString wxmbTemplateText = wxmbEnabled ? ReadTemplateText(templateObject, QStringLiteral("微信密保.txt")) : QString();
+    const QString transferTemplateText = (wxmbEnabled && transferEnabled) ? ReadTemplateText(templateObject, QStringLiteral("自助转区.txt")) : QString();
+    const QString rechargeMenuFileName = LoadRechargeTemplateFileName(installContext.buildType);
+    const QString rechargeMenuTemplateText = ReadTemplateText(templateObject, rechargeMenuFileName);
+    const QString integralMenuTemplateText = ReadTemplateText(templateObject, QStringLiteral("积分.txt"));
+    const QString additionalMenuTemplateText = ReadTemplateText(templateObject, QStringLiteral("附加赠送.txt"));
+    const QString equipMenuTemplateText = ReadTemplateText(templateObject, QStringLiteral("装备.txt"));
 
     const QString commandToken = BuildEngineCommandToken(templateObject, currencyName);
     const QString ratioText = FormatNumber(ReadDoubleField(templateObject, {QStringLiteral("Ratio"), QStringLiteral("ratio")}, 1.0));
-    const QString resourceCode = ReadStringField(scanObject, {QStringLiteral("ResourceCode"), QStringLiteral("resourceCode")});
-    const QString imageCode = ReadStringField(scanObject, {QStringLiteral("ImageCode"), QStringLiteral("imageCode")});
-    const QString xOffset = ReadStringField(scanObject, {QStringLiteral("XOffset"), QStringLiteral("xOffset")});
-    const QString yOffset = ReadStringField(scanObject, {QStringLiteral("YOffset"), QStringLiteral("yOffset")});
-    const QString serial = ReadStringField(scanObject, {QStringLiteral("Serial"), QStringLiteral("serial")});
+    const QString resourceCode = ReadScanOrTemplateResourceText(
+        scanObject, templateObject, {QStringLiteral("ResourceCode"), QStringLiteral("resourceCode")});
+    const QString imageCode = ReadScanOrTemplateResourceText(
+        scanObject, templateObject, {QStringLiteral("ImageCode"), QStringLiteral("imageCode")});
+    const double xOffsetVal = ReadScanOrTemplateDouble(
+        scanObject, templateObject, {QStringLiteral("XOffset"), QStringLiteral("xOffset")}, 0.0);
+    const double yOffsetVal = ReadScanOrTemplateDouble(
+        scanObject, templateObject, {QStringLiteral("YOffset"), QStringLiteral("yOffset")}, 0.0);
+    const QString xOffset = QString::number(xOffsetVal, 'g', 15);
+    const QString yOffset = QString::number(yOffsetVal, 'g', 15);
+    const QString serial = QString::number(
+        ReadIntField(scanObject, {QStringLiteral("Serial"), QStringLiteral("serial")}, 0));
 
     auto replacePlaceholderLine = [](QString text, const QString &placeholder, const QString &replacement) {
         return text.replace(placeholder, replacement);
@@ -1545,45 +1748,51 @@ bool UpdateMarketDefScripts(const QString &envirPath,
                                            ? QStringLiteral("充值%1\\红包赠送").arg(currencyName)
                                            : QStringLiteral("充值%1").arg(currencyName);
 
-        calls << QStringLiteral("#CALL [\\%1\\%2\\%2.txt] @领取%2").arg(payDir + (payDir.isEmpty() ? QString() : QStringLiteral("\\")) + rechargePrefix,
-                                                                              currencyName);
-
-        for (const auto &integralValue : integralGives) {
-            if (!integralValue.isObject()) {
-                continue;
-            }
-            const QJsonObject integralObject = integralValue.toObject();
-            const int type = ReadIntField(integralObject, {QStringLiteral("Type"), QStringLiteral("type")});
-            const QString name = ReadStringField(integralObject, {QStringLiteral("Name"), QStringLiteral("name")});
-            if (type == 0 || name.isEmpty()) {
-                continue;
-            }
-            calls << QStringLiteral("#CALL [\\%1\\积分充值\\%2充值\\%2.txt] @领取%2")
-                         .arg(payDir + (payDir.isEmpty() ? QString() : QStringLiteral("\\")) + rechargePrefix,
-                              name);
+        if (!rechargeMenuTemplateText.isEmpty()) {
+            calls << QStringLiteral("#CALL [\\%1\\%2\\%2.txt] @领取%2").arg(payDir + (payDir.isEmpty() ? QString() : QStringLiteral("\\")) + rechargePrefix,
+                                                                                  currencyName);
         }
 
-        if (hasEquipGive) {
+        if (!integralMenuTemplateText.isEmpty()) {
+            for (const auto &integralValue : integralGives) {
+                if (!integralValue.isObject()) {
+                    continue;
+                }
+                const QJsonObject integralObject = integralValue.toObject();
+                const int type = ReadIntField(integralObject, {QStringLiteral("Type"), QStringLiteral("type")});
+                const QString name = ReadStringField(integralObject, {QStringLiteral("Name"), QStringLiteral("name")});
+                if (type == 0 || name.isEmpty()) {
+                    continue;
+                }
+                calls << QStringLiteral("#CALL [\\%1\\积分充值\\%2充值\\%2.txt] @领取%2")
+                             .arg(payDir + (payDir.isEmpty() ? QString() : QStringLiteral("\\")) + rechargePrefix,
+                                  name);
+            }
+        }
+
+        if (hasEquipGive && !equipMenuTemplateText.isEmpty()) {
             calls << QStringLiteral("#CALL [\\%1\\装备赠送\\装备.txt] @领取装备")
                          .arg(payDir + (payDir.isEmpty() ? QString() : QStringLiteral("\\")) + rechargePrefix);
         }
 
-        for (const auto &additionalValue : additionalGives) {
-            if (!additionalValue.isObject()) {
-                continue;
+        if (!additionalMenuTemplateText.isEmpty()) {
+            for (const auto &additionalValue : additionalGives) {
+                if (!additionalValue.isObject()) {
+                    continue;
+                }
+                const QJsonObject additionalObject = additionalValue.toObject();
+                const int type = ReadIntField(additionalObject, {QStringLiteral("Type"), QStringLiteral("type")});
+                const QString name = ReadStringField(additionalObject, {QStringLiteral("Name"), QStringLiteral("name")});
+                if (type == 0 || name.isEmpty()) {
+                    continue;
+                }
+                calls << QStringLiteral("#CALL [\\%1\\附加赠送\\%2\\%2.txt] @领取%2")
+                             .arg(payDir + (payDir.isEmpty() ? QString() : QStringLiteral("\\")) + rechargePrefix,
+                                  name);
             }
-            const QJsonObject additionalObject = additionalValue.toObject();
-            const int type = ReadIntField(additionalObject, {QStringLiteral("Type"), QStringLiteral("type")});
-            const QString name = ReadStringField(additionalObject, {QStringLiteral("Name"), QStringLiteral("name")});
-            if (type == 0 || name.isEmpty()) {
-                continue;
-            }
-            calls << QStringLiteral("#CALL [\\%1\\附加赠送\\%2\\%2.txt] @领取%2")
-                         .arg(payDir + (payDir.isEmpty() ? QString() : QStringLiteral("\\")) + rechargePrefix,
-                              name);
         }
 
-        if (wxmbEnabled && transferEnabled) {
+        if (wxmbEnabled && transferEnabled && !transferTemplateText.isEmpty()) {
             calls << QStringLiteral("#CALL [\\%1\\充值%2\\转区功能\\转区点.txt] @领取转区点").arg(payDir, currencyName);
         }
 
@@ -1627,7 +1836,7 @@ bool UpdateMarketDefScripts(const QString &envirPath,
                 continue;
             }
             const QJsonObject productObject = productValue.toObject();
-            const QString productId = ReadStringField(productObject, {QStringLiteral("Id"), QStringLiteral("id")});
+            const QString productId = ReadJsonScalarAsString(productObject, {QStringLiteral("Id"), QStringLiteral("id")});
             const QString productName = ReadStringField(productObject, {QStringLiteral("Name"), QStringLiteral("name")});
             if (productName.isEmpty()) {
                 continue;
@@ -1663,139 +1872,224 @@ bool UpdateMarketDefScripts(const QString &envirPath,
             const QJsonObject circuitObject = circuitValue.toObject();
             const QString circuitName = ReadStringField(circuitObject, {QStringLiteral("Name"), QStringLiteral("name")});
             const QString domainName = ReadStringField(circuitObject, {QStringLiteral("DomainName"), QStringLiteral("domainName")});
-            const QString port = ReadStringField(circuitObject, {QStringLiteral("Port"), QStringLiteral("port")});
+            const QString portRaw = ReadJsonScalarAsString(circuitObject, {QStringLiteral("Port"), QStringLiteral("port")});
             if (circuitName.isEmpty()) {
                 continue;
             }
+            const QString port = ResolveWebCircuitPort(domainName, portRaw);
             sections << QStringLiteral("[@%1]\r\n#IF\r\n#ACT\r\n%2 %3:%4/Default/Partition/%5\r\n")
                             .arg(circuitName,
                                  browserCommand,
                                  domainName,
-                                 port.isEmpty() ? QStringLiteral("80") : port,
+                                 port,
                                  partitionUuid);
         }
         return sections.join(QStringLiteral("\r\n"));
     };
 
-    const QJsonArray templateNpcs = ReadArrayField(templateObject, {QStringLiteral("Npcs"), QStringLiteral("npcs")});
-    for (const auto &npcValue : templateNpcs) {
-        if (!npcValue.isObject()) {
-            continue;
-        }
+    if (!npcTemplateText.isEmpty()) {
+        const QJsonArray templateNpcs = ReadArrayField(templateObject, {QStringLiteral("Npcs"), QStringLiteral("npcs")});
+        for (const auto &npcValue : templateNpcs) {
+            if (!npcValue.isObject()) {
+                continue;
+            }
 
-        const QJsonObject npcObject = npcValue.toObject();
-        const QString npcName = ReadStringField(npcObject, {QStringLiteral("Name"), QStringLiteral("name")});
-        const QString mapName = ReadStringField(npcObject, {QStringLiteral("Map"), QStringLiteral("map")});
-        const QString fileName = BuildMarketScriptFileName(npcName, mapName);
-        if (fileName.isEmpty()) {
-            continue;
-        }
+            const QJsonObject npcObject = npcValue.toObject();
+            const QString npcName = ReadStringField(npcObject, {QStringLiteral("Name"), QStringLiteral("name")});
+            const QString mapName = ReadStringField(npcObject, {QStringLiteral("Map"), QStringLiteral("map")});
+            const QString fileName = BuildMarketScriptFileName(npcName, mapName);
+            if (fileName.isEmpty()) {
+                continue;
+            }
 
-        QString script = npcTemplateText;
-        script.replace(QStringLiteral("#command#"), commandToken);
-        script.replace(QStringLiteral("#type#"), currencyName);
-        script.replace(QStringLiteral("#czbili#"), QStringLiteral("1:%1").arg(ratioText));
-        script.replace(QStringLiteral("%cur_name%"), transferCoinName);
-        script.replace(QStringLiteral("%currency%"), transferCoinVar);
-        script.replace(QStringLiteral("${领取}"),
-                       (installContext.isTongQu && installContext.buildType == 2)
-                           ? QStringLiteral("#IF\r\nNOT CHECKTEXTLIST ..\\QuestDiary\\开区状态.txt 测试\r\n#ACT\r\n#CALL [\\测试充值记录\\测试领取.txt] @测试领取")
-                           : QString());
+            const QString remoteMarketDef = ReadMergedInstallScriptContent(QStringLiteral("Market_Def\\") + fileName);
+            if (!remoteMarketDef.isEmpty()) {
+                const QString overrideText = ReadPartitionOutputOverrideForMarketFile(fileName);
+                const QString baseRemote = overrideText.isEmpty() ? remoteMarketDef : overrideText;
+                const bool transferCoinButton = wxmbEnabled && transferEnabled && !transferTemplateText.isEmpty();
+                const QString toWriteRemote =
+                    ApplyPartitionScanModeToRechargeNpcScript(baseRemote, scanMode, transferCoinButton);
+                if (!WriteTextFile(QDir(marketDefPath).filePath(fileName), toWriteRemote, errorMessage)) {
+                    return false;
+                }
+                continue;
+            }
 
-        QString czButton = QStringLiteral("<领取充值/@领取>");
-        if (scanMode == 0) {
-            czButton += QStringLiteral(" ┆ <扫码充值/@扫码充值>");
-        } else if (scanMode == 1) {
-            czButton += QStringLiteral("┆ <网页充值/@网页充值> ┆ <扫码充值/@扫码充值>");
-        } else if (scanMode == 2) {
-            czButton += QStringLiteral(" ┆ <网页充值/@网页充值>");
-        }
-        if (wxmbEnabled && transferEnabled) {
-            czButton += QStringLiteral(" ┆ <游戏币充值/@游戏币充值>");
-        }
-        czButton += QStringLiteral("  ┆ <退出/@exit>\\");
-        script.replace(QStringLiteral("%CZ_button%"), czButton);
-        script = replacePlaceholderLine(script, QStringLiteral("#czTdao#"), webCircuitMenu());
-        script.replace(QStringLiteral("#czTdaoList#"), webCircuitSections());
-        script = replacePlaceholderLine(script, QStringLiteral("#smTdao#"), groupedProductMenu());
-        script = ReplaceSection(script, QStringLiteral(";====begin"), QStringLiteral(";====end"), QStringLiteral(";====begin\r\n%1\r\n;====end").arg(scanInputSections()));
-        script.replace(QStringLiteral("%AreaID%"), partitionId);
-        script.replace(QStringLiteral("%TemplateID%"), templateId);
-        script.replace(QStringLiteral("%Wil%"), resourceCode);
-        script.replace(QStringLiteral("%pic%"), imageCode);
-        script.replace(QStringLiteral("%x%"), xOffset);
-        script.replace(QStringLiteral("%y%"), yOffset);
-        script.replace(QStringLiteral("%size%"), serial);
-        script.replace(QStringLiteral("%path%"), RelativePlatformPath());
-        script.replace(QStringLiteral("#mir2command#"), BuildTransferMirCommandBlock(integralGives));
-        script.replace(QStringLiteral("#CALL_CZ##CALL_FJZS##CALL_JF##CALL_ZB##CALL_CT##CALL_ZQ#"),
-                       buildGiveCallBlock(!ReadBoolField(npcObject, {QStringLiteral("Type"), QStringLiteral("type")}, true)));
+            QString script = npcTemplateText;
+            script.replace(QStringLiteral("#command#"), commandToken);
+            script.replace(QStringLiteral("#type#"), currencyName);
+            script.replace(QStringLiteral("#czbili#"), QStringLiteral("1:%1").arg(ratioText));
+            script.replace(QStringLiteral("%cur_name%"), transferCoinName);
+            script.replace(QStringLiteral("%currency%"), transferCoinVar);
+            script.replace(QStringLiteral("${领取}"),
+                           (installContext.isTongQu && installContext.isTest && installContext.buildType == 2)
+                               ? QStringLiteral("#IF\r\nNOT CHECKTEXTLIST ..\\QuestDiary\\开区状态.txt 测试\r\n#ACT\r\n#CALL [\\测试充值记录\\测试领取.txt] @测试领取")
+                               : QString());
 
-        if (!transferEnabled || !wxmbEnabled) {
-            script = RemoveSection(script, QStringLiteral(";<!----(通用币充值)"), QStringLiteral(";---->"));
-        }
-        if (scanMode == 0) {
-            script = RemoveSection(script, QStringLiteral(";<!----(网页充值)"), QStringLiteral(";---->"));
-        }
-        if (scanMode == 2) {
-            script = RemoveSection(script, QStringLiteral(";<!----(扫码充值)"), QStringLiteral(";---->"));
-        }
+            QString czButton = QStringLiteral("<领取充值/@领取>");
+            if (scanMode == 0) {
+                czButton += QStringLiteral(" ┆ <扫码充值/@扫码充值>");
+            } else if (scanMode == 1) {
+                czButton += QStringLiteral("┆ <网页充值/@网页充值> ┆ <扫码充值/@扫码充值>");
+            } else if (scanMode == 2) {
+                czButton += QStringLiteral(" ┆ <网页充值/@网页充值>");
+            }
+            if (wxmbEnabled && transferEnabled && !transferTemplateText.isEmpty()) {
+                czButton += QStringLiteral(" ┆ <游戏币充值/@游戏币充值>");
+            }
+            czButton += QStringLiteral("  ┆ <退出/@exit>\\");
+            script.replace(QStringLiteral("%CZ_button%"), czButton);
+            script = replacePlaceholderLine(script, QStringLiteral("#czTdao#"), webCircuitMenu());
+            script.replace(QStringLiteral("#czTdaoList#"), webCircuitSections());
+            script = replacePlaceholderLine(script, QStringLiteral("#smTdao#"), groupedProductMenu());
+            script = ReplaceSection(script, QStringLiteral(";====begin"), QStringLiteral(";====end"), QStringLiteral(";====begin\r\n%1\r\n;====end").arg(scanInputSections()));
+            script.replace(QStringLiteral("%AreaID%"), partitionId);
+            script.replace(QStringLiteral("%TemplateID%"), templateId);
+            script.replace(QStringLiteral("%Wil%"), resourceCode);
+            script.replace(QStringLiteral("%pic%"), imageCode);
+            script.replace(QStringLiteral("%x%"), xOffset);
+            script.replace(QStringLiteral("%y%"), yOffset);
+            script.replace(QStringLiteral("%size%"), serial);
+            script.replace(QStringLiteral("%path%"), RelativePlatformPath());
+            script.replace(QStringLiteral("#mir2command#"), BuildTransferMirCommandBlock(integralGives));
+            script.replace(QStringLiteral("#CALL_CZ##CALL_FJZS##CALL_JF##CALL_ZB##CALL_CT##CALL_ZQ#"),
+                           buildGiveCallBlock(!ReadBoolField(npcObject, {QStringLiteral("Type"), QStringLiteral("type")}, true)));
 
-        if (!WriteTextFile(QDir(marketDefPath).filePath(fileName), script, errorMessage)) {
-            return false;
+            if (!transferEnabled || !wxmbEnabled || transferTemplateText.isEmpty()) {
+                script = RemoveSection(script, QStringLiteral(";<!----(通用币充值)"), QStringLiteral(";---->"));
+            }
+            if (scanMode == 0) {
+                script = RemoveSection(script, QStringLiteral(";<!----(网页充值)"), QStringLiteral(";---->"));
+            }
+            if (scanMode == 2) {
+                script = RemoveSection(script, QStringLiteral(";<!----(扫码充值)"), QStringLiteral(";---->"));
+            }
+
+            const QString overrideText = ReadPartitionOutputOverrideForMarketFile(fileName);
+            const QString toWrite = overrideText.isEmpty() ? script : overrideText;
+            if (!WriteTextFile(QDir(marketDefPath).filePath(fileName), toWrite, errorMessage)) {
+                return false;
+            }
         }
     }
 
-    const QString wxmbNpcName = ReadStringField(wxmbTemplateObject, {QStringLiteral("NpcName"), QStringLiteral("npcName")});
-    const QJsonArray wxmbNpcs = ReadArrayField(wxmbTemplateObject, {QStringLiteral("npcs"), QStringLiteral("Npcs")});
-    for (const auto &npcValue : wxmbNpcs) {
-        if (!npcValue.isObject()) {
-            continue;
-        }
+    if (wxmbEnabled && !wxmbTemplateText.isEmpty()) {
+        const QString wxmbNpcName = ReadStringField(wxmbTemplateObject, {QStringLiteral("NpcName"), QStringLiteral("npcName")});
+        const QJsonArray wxmbNpcs = ReadArrayField(wxmbTemplateObject,
+                                                   {QStringLiteral("Npcs"),
+                                                    QStringLiteral("npcs"),
+                                                    QStringLiteral("WxmbTemplateNpcs"),
+                                                    QStringLiteral("wxmbTemplateNpcs")});
+        for (const auto &npcValue : wxmbNpcs) {
+            if (!npcValue.isObject()) {
+                continue;
+            }
 
-        const QJsonObject npcObject = npcValue.toObject();
-        const QString mapName = ReadStringField(npcObject, {QStringLiteral("MapId"), QStringLiteral("mapId")});
-        const QString fileName = BuildMarketScriptFileName(wxmbNpcName, mapName);
-        if (fileName.isEmpty()) {
-            continue;
-        }
+            const QJsonObject npcObject = npcValue.toObject();
+            const QString mapName = ReadJsonMerchantScalarAsString(npcObject,
+                                                                   {QStringLiteral("MapId"),
+                                                                    QStringLiteral("mapId"),
+                                                                    QStringLiteral("Map"),
+                                                                    QStringLiteral("map")});
+            const QString fileName = BuildMarketScriptFileName(wxmbNpcName, mapName);
+            if (fileName.isEmpty()) {
+                continue;
+            }
 
-        QString script = wxmbTemplateText;
-        script.replace(QStringLiteral("%AreaID%"), partitionId);
-        script.replace(QStringLiteral("%path%"), RelativePlatformPath());
-        script.replace(QStringLiteral("%machine%"), machineVar);
-        script.replace(QStringLiteral("%wechatid%"), openidVar);
-        script.replace(QStringLiteral("%wechatna%"), wxVar);
-        if (!WriteTextFile(QDir(marketDefPath).filePath(fileName), script, errorMessage)) {
-            return false;
+            const QString remoteWxmbDef = ReadMergedInstallScriptContent(QStringLiteral("Market_Def\\") + fileName);
+            if (!remoteWxmbDef.isEmpty()) {
+                const bool isForceBindRemote = ReadBoolField(wxmbTemplateObject, {QStringLiteral("IsForce"), QStringLiteral("isForce")});
+                const QString stateTextRemote = isForceBindRemote ? QStringLiteral("是") : QStringLiteral("否");
+                QString scriptRemote = remoteWxmbDef;
+                scriptRemote.replace(QStringLiteral("%State%"), stateTextRemote);
+                const QString overrideTextWxRemote = ReadPartitionOutputOverrideForMarketFile(fileName);
+                const QString toWriteWxRemote = overrideTextWxRemote.isEmpty() ? scriptRemote : overrideTextWxRemote;
+                if (!WriteTextFile(QDir(marketDefPath).filePath(fileName), toWriteWxRemote, errorMessage)) {
+                    return false;
+                }
+                continue;
+            }
+
+            QString script = wxmbTemplateText;
+            script.replace(QStringLiteral("%AreaID%"), partitionId);
+            script.replace(QStringLiteral("%path%"), RelativePlatformPath());
+            script.replace(QStringLiteral("%machine%"), machineVar);
+            script.replace(QStringLiteral("%wechatid%"), openidVar);
+            script.replace(QStringLiteral("%wechatna%"), wxVar);
+            const bool isForceBind = ReadBoolField(wxmbTemplateObject, {QStringLiteral("IsForce"), QStringLiteral("isForce")});
+            script.replace(QStringLiteral("%State%"), isForceBind ? QStringLiteral("是") : QStringLiteral("否"));
+            const QString overrideTextWx = ReadPartitionOutputOverrideForMarketFile(fileName);
+            const QString toWriteWx = overrideTextWx.isEmpty() ? script : overrideTextWx;
+            if (!WriteTextFile(QDir(marketDefPath).filePath(fileName), toWriteWx, errorMessage)) {
+                return false;
+            }
         }
     }
 
-    const QString transferNpcName = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferNpcName"), QStringLiteral("transferNpcName")});
-    const QJsonArray transferNpcs = ReadArrayField(wxmbTemplateObject, {QStringLiteral("transferNpcs"), QStringLiteral("TransferNpcs")});
-    for (const auto &npcValue : transferNpcs) {
-        if (!npcValue.isObject()) {
-            continue;
-        }
+    if (wxmbEnabled && transferEnabled && !transferTemplateText.isEmpty()) {
+        const QString transferNpcName = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferNpcName"), QStringLiteral("transferNpcName")});
+        const QJsonArray transferNpcs = ReadArrayField(wxmbTemplateObject, {QStringLiteral("transferNpcs"), QStringLiteral("TransferNpcs")});
+        for (const auto &npcValue : transferNpcs) {
+            if (!npcValue.isObject()) {
+                continue;
+            }
 
-        const QJsonObject npcObject = npcValue.toObject();
-        const QString mapName = ReadStringField(npcObject, {QStringLiteral("MapId"), QStringLiteral("mapId")});
-        const QString fileName = BuildMarketScriptFileName(transferNpcName, mapName);
-        if (fileName.isEmpty()) {
-            continue;
-        }
+            const QJsonObject npcObject = npcValue.toObject();
+            const QString mapName = ReadJsonMerchantScalarAsString(npcObject,
+                                                                   {QStringLiteral("MapId"),
+                                                                    QStringLiteral("mapId"),
+                                                                    QStringLiteral("Map"),
+                                                                    QStringLiteral("map")});
+            const QString fileName = BuildMarketScriptFileName(transferNpcName, mapName);
+            if (fileName.isEmpty()) {
+                continue;
+            }
 
-        QString script = transferTemplateText;
-        script.replace(QStringLiteral("%AreaID%"), partitionId);
-        script.replace(QStringLiteral("%path%"), RelativePlatformPath());
-        script.replace(QStringLiteral("%cur_name%"), transferCoinName);
-        script.replace(QStringLiteral("%wechatid%"), openidVar);
-        script.replace(QStringLiteral("%minimum%"), QString::number(int(ReadDoubleField(wxmbTemplateObject, {QStringLiteral("TransferMinAmount"), QStringLiteral("transferMinAmount")}, 0.0))));
-        script.replace(QStringLiteral("%switchval%"), transferRechargeVar);
-        script.replace(QStringLiteral("%usedval%"), transferUsedVar);
-        script.replace(QStringLiteral("%isbind%"), ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferFlagVar"), QStringLiteral("transferFlagVar")}));
-        if (!WriteTextFile(QDir(marketDefPath).filePath(fileName), script, errorMessage)) {
-            return false;
+            const QString remoteTransferDef = ReadMergedInstallScriptContent(QStringLiteral("Market_Def\\") + fileName);
+            if (!remoteTransferDef.isEmpty()) {
+                QString scriptRemote = remoteTransferDef;
+                scriptRemote.replace(QStringLiteral("%AreaID%"), partitionId);
+                scriptRemote.replace(QStringLiteral("%path%"), RelativePlatformPath());
+                scriptRemote.replace(QStringLiteral("%cur_name%"), transferCoinName);
+                scriptRemote.replace(QStringLiteral("%currency%"), transferCoinVar);
+                scriptRemote.replace(QStringLiteral("%wechatid%"), openidVar);
+                scriptRemote.replace(QStringLiteral("%minimum%"),
+                                     QString::number(int(ReadDoubleField(wxmbTemplateObject,
+                                                                          {QStringLiteral("TransferMinAmount"),
+                                                                           QStringLiteral("transferMinAmount")},
+                                                                          0.0))));
+                scriptRemote.replace(QStringLiteral("%switchval%"), transferRechargeVar);
+                scriptRemote.replace(QStringLiteral("%usedval%"), transferUsedVar);
+                scriptRemote.replace(QStringLiteral("%isbind%"),
+                                     ReadStringField(wxmbTemplateObject,
+                                                     {QStringLiteral("TransferFlagVar"), QStringLiteral("transferFlagVar")}));
+                scriptRemote.replace(QStringLiteral("%wx%"), xOffset);
+                scriptRemote.replace(QStringLiteral("%wy%"), yOffset);
+                const QString overrideTextTrRemote = ReadPartitionOutputOverrideForMarketFile(fileName);
+                const QString toWriteTrRemote = overrideTextTrRemote.isEmpty() ? scriptRemote : overrideTextTrRemote;
+                if (!WriteTextFile(QDir(marketDefPath).filePath(fileName), toWriteTrRemote, errorMessage)) {
+                    return false;
+                }
+                continue;
+            }
+
+            QString script = transferTemplateText;
+            script.replace(QStringLiteral("%AreaID%"), partitionId);
+            script.replace(QStringLiteral("%path%"), RelativePlatformPath());
+            script.replace(QStringLiteral("%cur_name%"), transferCoinName);
+            script.replace(QStringLiteral("%currency%"), transferCoinVar);
+            script.replace(QStringLiteral("%wechatid%"), openidVar);
+            script.replace(QStringLiteral("%minimum%"), QString::number(int(ReadDoubleField(wxmbTemplateObject, {QStringLiteral("TransferMinAmount"), QStringLiteral("transferMinAmount")}, 0.0))));
+            script.replace(QStringLiteral("%switchval%"), transferRechargeVar);
+            script.replace(QStringLiteral("%usedval%"), transferUsedVar);
+            script.replace(QStringLiteral("%isbind%"), ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferFlagVar"), QStringLiteral("transferFlagVar")}));
+            script.replace(QStringLiteral("%wx%"), xOffset);
+            script.replace(QStringLiteral("%wy%"), yOffset);
+            const QString overrideTextTr = ReadPartitionOutputOverrideForMarketFile(fileName);
+            const QString toWriteTr = overrideTextTr.isEmpty() ? script : overrideTextTr;
+            if (!WriteTextFile(QDir(marketDefPath).filePath(fileName), toWriteTr, errorMessage)) {
+                return false;
+            }
         }
     }
 
@@ -1816,30 +2110,32 @@ bool CreateRechargeScriptSkeleton(const QString &envirPath,
         return true;
     }
 
-    const QString partitionId = ReadStringField(partitionObject, {QStringLiteral("Id"), QStringLiteral("id")});
+    const QString partitionId = ReadJsonScalarAsString(partitionObject, {QStringLiteral("Id"), QStringLiteral("id")});
     const QString scriptCommand = ReadStringField(templateObject, {QStringLiteral("ScriptCommand"), QStringLiteral("scriptCommand")});
     const double ratio = ReadDoubleField(templateObject, {QStringLiteral("Ratio"), QStringLiteral("ratio")}, 1.0);
-    const QString formattedRatio = FormatNumber(ratio);
     const QString transferRechargeVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferRechargeVar"), QStringLiteral("transferRechargeVar")});
     const QString payDir = ReadStringField(templateObject, {QStringLiteral("PayDir"), QStringLiteral("payDir")});
     const QJsonArray integralGives = ReadArrayField(templateObject, {QStringLiteral("IntegralGives"), QStringLiteral("integralGives")});
     const QJsonArray additionalGives = ReadArrayField(templateObject, {QStringLiteral("AdditionalGives"), QStringLiteral("additionalGives")});
-    const bool hasEquipGive = !ReadArrayField(templateObject, {QStringLiteral("EquipGives"), QStringLiteral("equipGives")}).isEmpty();
     const QString gameEngine = ReadStringField(templateObject, {QStringLiteral("GameEngine"), QStringLiteral("gameEngine")});
     const QString rechargeTemplateFileName = LoadRechargeTemplateFileName(installContext.buildType);
-    const QString rechargeTemplateText = RequireTemplateText(templateObject, rechargeTemplateFileName, errorMessage);
-    if (rechargeTemplateText.isEmpty()) {
-        return false;
-    }
-    const QString additionalTemplateText = RequireTemplateText(templateObject, QStringLiteral("附加赠送.txt"), errorMessage);
-    const QString equipTemplateText = RequireTemplateText(templateObject, QStringLiteral("装备.txt"), errorMessage);
-    const QString integralTemplateText = RequireTemplateText(templateObject, QStringLiteral("积分.txt"), errorMessage);
-    const QString transferTemplateText = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferCoinName"), QStringLiteral("transferCoinName")}).isEmpty()
+    const QString rechargeTemplateText = ReadTemplateText(templateObject, rechargeTemplateFileName);
+    const QString additionalTemplateText = ReadTemplateText(templateObject, QStringLiteral("附加赠送.txt"));
+    const QString equipTemplateText = ReadTemplateText(templateObject, QStringLiteral("装备.txt"));
+    const QString integralTemplateText = ReadTemplateText(templateObject, QStringLiteral("积分.txt"));
+    const QString transferCoinName = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferCoinName"), QStringLiteral("transferCoinName")});
+    const QString transferTemplateText = transferCoinName.isEmpty()
                                              ? QString()
-                                             : RequireTemplateText(templateObject, QStringLiteral("转区点.txt"), errorMessage);
-    if (additionalTemplateText.isEmpty() || equipTemplateText.isEmpty() || integralTemplateText.isEmpty()
-        || (!ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferCoinName"), QStringLiteral("transferCoinName")}).isEmpty() && transferTemplateText.isEmpty())) {
-        return false;
+                                             : ReadTemplateText(templateObject, QStringLiteral("转区点.txt"));
+
+    const bool needRechargeMain = !rechargeTemplateText.isEmpty();
+    const bool needIntegral = !integralTemplateText.isEmpty();
+    const bool needAdditional = !additionalTemplateText.isEmpty();
+    const bool needEquip = !equipTemplateText.isEmpty();
+    const bool needTransfer = !transferCoinName.isEmpty() && !transferTemplateText.isEmpty();
+    const bool needAnyQuest = needRechargeMain || needIntegral || needAdditional || needEquip || needTransfer;
+    if (!needAnyQuest) {
+        return true;
     }
 
     const QString rechargeRootPath = QDir(questDiaryPath).filePath(QStringLiteral("充值%1").arg(currencyName));
@@ -1850,34 +2146,25 @@ bool CreateRechargeScriptSkeleton(const QString &envirPath,
     const QString transferPath = QDir(rechargeRootPath).filePath(QStringLiteral("转区功能"));
     const QString rechargeIntegralPath = QDir(questDiaryPath).filePath(QStringLiteral("充值积分"));
 
-    const QStringList directories = {
-        rechargeRootPath,
-        currencyPath,
-        additionalPath,
-        equipPath,
-        integerPath,
-        rechargeIntegralPath,
-        transferPath
-    };
-
-    for (const auto &directory : directories) {
-        if (!EnsureDirectoryExists(directory, errorMessage)) {
-            return false;
-        }
-    }
-
-    if (!EnsureAmountFiles(currencyPath, errorMessage)) {
+    if (!EnsureDirectoryExists(rechargeRootPath, errorMessage)) {
         return false;
     }
-
-    const QStringList files = {
-        QDir(currencyPath).filePath(QStringLiteral("%1.txt").arg(currencyName)),
-        QDir(equipPath).filePath(QStringLiteral("装备.txt"))
-    };
-    for (const auto &filePath : files) {
-        if (!EnsureEmptyFileExists(filePath, errorMessage)) {
+    if (needIntegral) {
+        if (!EnsureDirectoryExists(integerPath, errorMessage)) {
             return false;
         }
+        if (!EnsureDirectoryExists(rechargeIntegralPath, errorMessage)) {
+            return false;
+        }
+    }
+    if (needAdditional && !EnsureDirectoryExists(additionalPath, errorMessage)) {
+        return false;
+    }
+    if (needEquip && !EnsureDirectoryExists(equipPath, errorMessage)) {
+        return false;
+    }
+    if (needTransfer && !EnsureDirectoryExists(transferPath, errorMessage)) {
+        return false;
     }
 
     auto renderRechargeTemplate = [&](const QString &sourceText) {
@@ -1928,15 +2215,34 @@ bool CreateRechargeScriptSkeleton(const QString &envirPath,
         return result;
     };
 
-    if (!WriteTextFile(QDir(currencyPath).filePath(QStringLiteral("%1.txt").arg(currencyName)), renderRechargeTemplate(rechargeTemplateText), errorMessage)) {
+    if (needRechargeMain) {
+        if (!EnsureDirectoryExists(currencyPath, errorMessage)) {
+            return false;
+        }
+        if (!EnsureAmountFiles(currencyPath, errorMessage)) {
+            return false;
+        }
+        const QString currencyMainFile = QDir(currencyPath).filePath(QStringLiteral("%1.txt").arg(currencyName));
+        if (!EnsureEmptyFileExists(currencyMainFile, errorMessage)) {
+            return false;
+        }
+        if (!WriteTextFile(currencyMainFile, renderRechargeTemplate(rechargeTemplateText), errorMessage)) {
+            return false;
+        }
+    }
+
+    if (needEquip) {
+        const QString equipMainFile = QDir(equipPath).filePath(QStringLiteral("装备.txt"));
+        if (!EnsureEmptyFileExists(equipMainFile, errorMessage)) {
+            return false;
+        }
+    }
+
+    if (needTransfer && !EnsureAmountFiles(transferPath, errorMessage)) {
         return false;
     }
 
-    const QString transferCoinName = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferCoinName"), QStringLiteral("transferCoinName")});
-    if (!transferCoinName.isEmpty() && !EnsureAmountFiles(transferPath, errorMessage)) {
-        return false;
-    }
-
+    if (needIntegral) {
     for (const auto &integralValue : integralGives) {
         if (!integralValue.isObject()) {
             continue;
@@ -1947,6 +2253,8 @@ bool CreateRechargeScriptSkeleton(const QString &envirPath,
         const QString fileName = ReadStringField(integralObject, {QStringLiteral("File"), QStringLiteral("file")});
         const double itemRatio = ReadDoubleField(integralObject, {QStringLiteral("Ratio"), QStringLiteral("ratio")}, 0.0);
         const int type = ReadIntField(integralObject, {QStringLiteral("Type"), QStringLiteral("type")});
+        /// 0 完全显示 / 1 部分显示（数量用 ***）/ 2 不显示（去掉广播行），与模板编辑 IntegralGive.Show 一致
+        const int integralShow = ReadIntField(integralObject, {QStringLiteral("Show"), QStringLiteral("show")}, 0);
         if (name.isEmpty() || type == 0) {
             continue;
         }
@@ -1966,6 +2274,13 @@ bool CreateRechargeScriptSkeleton(const QString &envirPath,
 
         QString wrappedBlock;
         QString block = ExtractCommentBlock(integralTemplateText, &wrappedBlock);
+        if (integralShow == 2) {
+            block = RemoveLinesContainingSubstring(block, QStringLiteral("<$积分数量>"));
+        } else if (integralShow == 1) {
+            block.replace(QStringLiteral("<$积分数量>"), QStringLiteral("***${积分名称}"));
+        } else {
+            block.replace(QStringLiteral("<$积分数量>"), QStringLiteral("${获得数量}${积分名称}"));
+        }
         const QString rewardPath = BuildRewardStoragePath(installContext, payDir, currencyName, {QStringLiteral("积分充值"), QStringLiteral("%1充值").arg(name)});
         block.replace(QStringLiteral("..<FILEPATH><FILENAME>"), QStringLiteral("%1\\${#充值路径}.txt%2").arg(rewardPath, gameEngine.contains(QStringLiteral("blue"), Qt::CaseInsensitive) ? QStringLiteral(" HardDisk") : QString()));
         block.replace(QStringLiteral("${游戏币}"), currencyName);
@@ -1988,7 +2303,7 @@ bool CreateRechargeScriptSkeleton(const QString &envirPath,
             item.replace(QStringLiteral("${命令}"), QStringLiteral("%1 + %2").arg(name, FormatNumber(amount * itemRatio)));
             item.replace(QStringLiteral("${命令2}"), QStringLiteral("%1 %2").arg(name, fileName));
             item.replace(QStringLiteral("${积分名称}"), name);
-            item.replace(QStringLiteral("${获得数量}"), QString::number(amount * itemRatio));
+            item.replace(QStringLiteral("${获得数量}"), FormatNumber(amount * itemRatio));
             generated << item;
         }
         QString result = ReplaceWrappedBlock(integralTemplateText, wrappedBlock, generated.join(QStringLiteral("\r\n")));
@@ -1999,7 +2314,9 @@ bool CreateRechargeScriptSkeleton(const QString &envirPath,
             return false;
         }
     }
+    }
 
+    if (needAdditional) {
     for (const auto &additionalValue : additionalGives) {
         if (!additionalValue.isObject()) {
             continue;
@@ -2056,7 +2373,9 @@ bool CreateRechargeScriptSkeleton(const QString &envirPath,
             return false;
         }
     }
+    }
 
+    if (needEquip) {
     const QJsonArray equipGives = ReadArrayField(templateObject, {QStringLiteral("EquipGives"), QStringLiteral("equipGives")});
     QStringList equipSections;
     QString wrappedEquipBlock;
@@ -2095,8 +2414,9 @@ bool CreateRechargeScriptSkeleton(const QString &envirPath,
     if (!WriteTextFile(QDir(equipPath).filePath(QStringLiteral("装备.txt")), equipResult, errorMessage)) {
         return false;
     }
+    }
 
-    if (!transferCoinName.isEmpty()) {
+    if (needTransfer) {
         QString wrappedTransferBlock;
         QString transferBlock = ExtractCommentBlock(transferTemplateText, &wrappedTransferBlock);
         const QString rewardPath = BuildRewardStoragePath(installContext, payDir, currencyName, {QStringLiteral("转区功能")});
@@ -2162,6 +2482,7 @@ bool CreateWxMbScriptSkeleton(const QString &envirPath,
                               const QJsonObject &scanObject,
                               QString *errorMessage)
 {
+    Q_UNUSED(scanObject);
     const QString payDir = ReadStringField(templateObject, {QStringLiteral("PayDir"), QStringLiteral("payDir")});
     if (payDir.isEmpty()) {
         return true;
@@ -2172,38 +2493,18 @@ bool CreateWxMbScriptSkeleton(const QString &envirPath,
         return false;
     }
 
-    const QString partitionId = ReadStringField(partitionObject, {QStringLiteral("Id"), QStringLiteral("id")});
+    const QString partitionId = ReadJsonScalarAsString(partitionObject, {QStringLiteral("Id"), QStringLiteral("id")});
     const QString machineVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("MachineVar"), QStringLiteral("machineVar")});
     const QString openidVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("OpenidVar"), QStringLiteral("openidVar")});
     const QString wxVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("WxVar"), QStringLiteral("wxVar")});
     const QString mbMapId = ReadStringField(wxmbTemplateObject, {QStringLiteral("MbMapId"), QStringLiteral("mbMapId")});
     const QString finishMapId = ReadStringField(wxmbTemplateObject, {QStringLiteral("FinishMapId"), QStringLiteral("finishMapId")});
     const QString transferFlagVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferFlagVar"), QStringLiteral("transferFlagVar")});
-    const QString transferRechargeVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferRechargeVar"), QStringLiteral("transferRechargeVar")});
-    const QString transferUsedVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferUsedVar"), QStringLiteral("transferUsedVar")});
-    const QString transferCoinName = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferCoinName"), QStringLiteral("transferCoinName")});
-    const QString transferCoinVar = ReadStringField(wxmbTemplateObject, {QStringLiteral("TransferCoinVar"), QStringLiteral("transferCoinVar")});
-    const QString resourceCode = ReadStringField(scanObject, {QStringLiteral("ResourceCode"), QStringLiteral("resourceCode")});
-    const bool isForce = ReadBoolField(wxmbTemplateObject, {QStringLiteral("IsForce"), QStringLiteral("isForce")});
 
     const QString loginCheckPath = QDir(wxmbPath).filePath(QStringLiteral("登录检测.txt"));
     QString loginCheckContent = ReadTemplateText(templateObject, QStringLiteral("密保登陆.txt"));
     if (!loginCheckContent.isEmpty()) {
-        loginCheckContent.replace(QStringLiteral("%isbind%"), transferFlagVar);
-        loginCheckContent.replace(QStringLiteral("%WilID%"), resourceCode);
-        loginCheckContent.replace(QStringLiteral("%CheckMapID%"), mbMapId);
-        loginCheckContent.replace(QStringLiteral("%mapid%"), finishMapId);
-        loginCheckContent.replace(QStringLiteral("%State%"), isForce ? QStringLiteral("1") : QStringLiteral("0"));
-        loginCheckContent.replace(QStringLiteral("%path%"), QStringLiteral("..\\..\\..\\..\\平台验证"));
-        loginCheckContent.replace(QStringLiteral("%machine%"), machineVar);
-        loginCheckContent.replace(QStringLiteral("%wechatid%"), openidVar);
-        loginCheckContent.replace(QStringLiteral("%wechatna%"), wxVar);
-        loginCheckContent.replace(QStringLiteral("%AreaID%"), partitionId);
-        loginCheckContent.replace(QStringLiteral("%switchval%"), transferRechargeVar);
-        loginCheckContent.replace(QStringLiteral("%usedval%"), transferUsedVar);
-        loginCheckContent.replace(QStringLiteral("%cur_name%"), transferCoinName);
-        loginCheckContent.replace(QStringLiteral("%currency%"), transferCoinVar);
-
+        // 正文来自 GetClientInstallScriptFiles 合并结果（非本机读模板 txt）；TenantServer 已按分区渲染占位符。
         if (!WriteTextFile(loginCheckPath, loginCheckContent, errorMessage)) {
             return false;
         }
@@ -2223,16 +2524,7 @@ bool CreateWxMbScriptSkeleton(const QString &envirPath,
         return false;
     }
 
-    if (!WriteTextFileIfEmpty(QDir(wxmbPath).filePath(QStringLiteral("提交认证.txt")),
-                              BuildWxMbSubmitScript(partitionId,
-                                                    payDir,
-                                                    QStringLiteral("%1_提交认证.txt").arg(partitionId.isEmpty() ? QStringLiteral("<empty>") : partitionId),
-                                                    machineVar,
-                                                    openidVar,
-                                                    wxVar),
-                              errorMessage)) {
-        return false;
-    }
+    // 与老网关 ProcessInstall 一致：不在 QuestDiary\<PayDir>\微信密保\ 下自动生成 提交认证.txt（由模板/商户合并脚本提供）。
 
     return EnsureLoginCheckHook(envirPath, payDir, errorMessage);
 }
@@ -2277,7 +2569,8 @@ bool InstallScriptProcessor::Process(const QJsonObject &dataObject, QString *err
     const QJsonObject wxmbTemplateObject = ReadObjectField(dataObject, {QStringLiteral("wxmbTemplate"), QStringLiteral("WxmbTemplate")});
 
     const QString scriptPath = ReadStringField(partitionObject, {QStringLiteral("ScriptPath"), QStringLiteral("scriptPath")});
-    const QString partitionId = ReadStringField(partitionObject, {QStringLiteral("Id"), QStringLiteral("id")});
+    const QString partitionId = ReadJsonScalarAsString(partitionObject, {QStringLiteral("Id"), QStringLiteral("id")});
+    const int partitionIdInt = ReadIntField(partitionObject, {QStringLiteral("Id"), QStringLiteral("id")}, 0);
     const QString payDir = ReadStringField(templateObject, {QStringLiteral("PayDir"), QStringLiteral("payDir")});
     const int isScan = ReadIntField(templateObject, {QStringLiteral("IsScan"), QStringLiteral("isScan")});
     const int isWxmb = ReadIntField(templateObject, {QStringLiteral("IsWxmb"), QStringLiteral("isWxmb")});
@@ -2288,6 +2581,18 @@ bool InstallScriptProcessor::Process(const QJsonObject &dataObject, QString *err
         }
         return false;
     }
+
+    QHash<QString, QString> remoteInstallScripts;
+    QHash<QString, QString> partitionOutputOverrides;
+    if (!FetchMergedInstallScriptsFromPlatform(templateObject,
+                                               partitionIdInt,
+                                               &remoteInstallScripts,
+                                               &partitionOutputOverrides,
+                                               errorMessage)) {
+        return false;
+    }
+    const RemoteInstallScriptTextsScope remoteScope(&remoteInstallScripts);
+    const PartitionOutputOverridesScope partitionOutScope(&partitionOutputOverrides);
 
     const QString rootPath = QDir(scriptPath).rootPath();
     const QString basePath = QDir(rootPath).filePath(QStringLiteral("平台验证"));
@@ -2320,6 +2625,7 @@ bool InstallScriptProcessor::Process(const QJsonObject &dataObject, QString *err
             }
         }
 
+        const QString legacySubmitPath = QDir(QDir(qrPath).filePath(QStringLiteral("充值提交"))).filePath(QStringLiteral("提交数据.txt"));
         const QStringList files = {
             submitFilePath,
             QDir(QDir(wxmbPath).filePath(QStringLiteral("提交数据"))).filePath(QStringLiteral("%1_提交认证.txt").arg(partitionId)),
@@ -2337,6 +2643,9 @@ bool InstallScriptProcessor::Process(const QJsonObject &dataObject, QString *err
                 return false;
             }
         }
+        if (!EnsureEmptyFileExists(legacySubmitPath, errorMessage)) {
+            return false;
+        }
 
         RegisterScanMonitorPath(submitFilePath);
     }
@@ -2348,9 +2657,7 @@ bool InstallScriptProcessor::Process(const QJsonObject &dataObject, QString *err
     if (!EnsureDirectoryExists(QDir(envirPath).filePath(QStringLiteral("Market_Def")), errorMessage)) {
         return false;
     }
-    if (!EnsureEmptyFileExists(QDir(envirPath).filePath(QStringLiteral("Merchant.txt")), errorMessage)) {
-        return false;
-    }
+    // Merchant.txt 由 UpdateMerchantInfo 合并写入；勿先截断，否则会清空原有非 7XPAY 段落
     if (!UpdateMerchantInfo(envirPath, templateObject, wxmbTemplateObject, errorMessage)) {
         return false;
     }

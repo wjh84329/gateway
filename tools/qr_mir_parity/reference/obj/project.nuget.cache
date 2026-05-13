@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "dgSpecHash": "TAEpPq1wQSI=",
+  "success": true,
+  "projectFilePath": "d:\\7xNew\\gateway\\tools\\qr_mir_parity\\reference\\QrMirParityReference.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\zhumir\\.nuget\\packages\\qrcoder\\1.6.0\\qrcoder.1.6.0.nupkg.sha512",
+    "C:\\Users\\zhumir\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.26\\microsoft.netcore.app.ref.8.0.26.nupkg.sha512",
+    "C:\\Users\\zhumir\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.26\\microsoft.windowsdesktop.app.ref.8.0.26.nupkg.sha512",
+    "C:\\Users\\zhumir\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.26\\microsoft.aspnetcore.app.ref.8.0.26.nupkg.sha512",
+    "C:\\Users\\zhumir\\.nuget\\packages\\microsoft.netcore.app.host.win-x64\\8.0.26\\microsoft.netcore.app.host.win-x64.8.0.26.nupkg.sha512"
+  ],
+  "logs": []
+}

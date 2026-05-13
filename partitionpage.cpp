@@ -36,6 +36,7 @@ PartitionPage::PartitionPage(QWidget *parent)
     auto *groupManagePage = new GroupManagePage(ui->contentStack);
 
     connect(partitionManagePage, &PartitionManagePage::statusMessageRequested, this, &PartitionPage::statusMessageRequested);
+    connect(partitionTemplatePage, &PartitionTemplatePage::statusMessageRequested, this, &PartitionPage::statusMessageRequested);
     connect(groupManagePage, &GroupManagePage::statusMessageRequested, this, &PartitionPage::statusMessageRequested);
 
     ui->contentStack->addWidget(partitionManagePage);

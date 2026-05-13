@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/tools">
+        <file alias="7za.exe">7za.exe</file>
+    </qresource>
+</RCC>

@@ -1,0 +1,2 @@
+历史行可忽略
+OrderTime:2026-05-07 12:00:00|SERVERNAME:测试区|USERNAME:角色A|USERID:testuser|Ip:192.168.1.1|Amount:100|PartitionId:1001

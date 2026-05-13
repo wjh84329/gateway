@@ -3,52 +3,216 @@
  <class>SettingsPage</class>
  <widget class="QWidget" name="SettingsPage">
   <layout class="QVBoxLayout" name="pageLayout">
-   <property name="leftMargin"><number>0</number></property>
-   <property name="topMargin"><number>0</number></property>
-   <property name="rightMargin"><number>0</number></property>
-   <property name="bottomMargin"><number>0</number></property>
-   <item><spacer name="verticalSpacerTop"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer></item>
-   <item alignment="Qt::AlignHCenter">
-    <widget class="QWidget" name="settingsContainer">
-     <property name="minimumSize"><size><width>460</width><height>0</height></size></property>
-     <property name="maximumSize"><size><width>460</width><height>16777215</height></size></property>
-     <layout class="QVBoxLayout" name="settingsContainerLayout">
-      <property name="spacing"><number>14</number></property>
-      <item>
-       <layout class="QGridLayout" name="settingsFormLayout">
-        <property name="horizontalSpacing"><number>10</number></property>
-        <property name="verticalSpacing"><number>10</number></property>
-        <item row="0" column="0"><widget class="QLabel" name="merchantNameLabel"><property name="text"><string>商户名称</string></property></widget></item>
-        <item row="0" column="1"><widget class="QWidget" name="merchantInfoWidget"><layout class="QHBoxLayout" name="merchantInfoLayout"><property name="spacing"><number>0</number></property><item><widget class="QLabel" name="merchantNameValue"><property name="text"><string>Tenant</string></property></widget></item><item><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item></layout></widget></item>
-        <item row="1" column="0"><widget class="QLabel" name="gatewayIdLabel"><property name="text"><string>网关标识</string></property></widget></item>
-        <item row="1" column="1"><widget class="QWidget" name="gatewayInfoWidget"><layout class="QHBoxLayout" name="gatewayInfoLayout"><property name="spacing"><number>12</number></property><item><widget class="QLabel" name="gatewayIdValue"><property name="text"><string>1122</string></property></widget></item><item><widget class="QPushButton" name="changeGatewayButton"><property name="text"><string>修改网关标识</string></property></widget></item><item><spacer name="horizontalSpacer_2"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item></layout></widget></item>
-        <item row="2" column="0"><widget class="QLabel" name="websiteLabel"><property name="text"><string>登陆网站</string></property></widget></item>
-        <item row="2" column="1"><widget class="QLineEdit" name="websiteEdit"/></item>
-        <item row="3" column="0"><widget class="QLabel" name="portLabel"><property name="text"><string>通讯端口</string></property></widget></item>
-        <item row="3" column="1"><widget class="QLineEdit" name="portEdit"/></item>
-        <item row="4" column="0"><widget class="QLabel" name="passwordLabel"><property name="text"><string>通讯密钥</string></property></widget></item>
-        <item row="4" column="1"><widget class="QLineEdit" name="passwordEdit"/></item>
-        <item row="5" column="0"><widget class="QLabel" name="apiKeyLabel"><property name="text"><string>接口秘钥</string></property></widget></item>
-        <item row="5" column="1"><widget class="QLineEdit" name="apiKeyEdit"/></item>
+   <property name="leftMargin"><number>32</number></property>
+   <property name="topMargin"><number>26</number></property>
+   <property name="rightMargin"><number>32</number></property>
+   <property name="bottomMargin"><number>26</number></property>
+   <property name="spacing"><number>0</number></property>
+   <item>
+    <layout class="QHBoxLayout" name="settingsOuterLayout">
+     <property name="spacing"><number>0</number></property>
+     <item>
+      <spacer name="horizontalSpacerLeft">
+       <property name="orientation"><enum>Qt::Horizontal</enum></property>
+       <property name="sizeHint" stdset="0"><size><width>0</width><height>20</height></size></property>
+       <property name="sizeType"><enum>QSizePolicy::Expanding</enum></property>
+      </spacer>
+     </item>
+     <item>
+       <widget class="QFrame" name="settingsCard">
+       <property name="frameShape"><enum>QFrame::NoFrame</enum></property>
+       <property name="minimumSize"><size><width>560</width><height>0</height></size></property>
+       <property name="maximumSize"><size><width>16777215</width><height>16777215</height></size></property>
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+         <horstretch>1</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <layout class="QVBoxLayout" name="settingsCardLayout">
+        <property name="spacing"><number>20</number></property>
+        <property name="leftMargin"><number>24</number></property>
+        <property name="topMargin"><number>28</number></property>
+        <property name="rightMargin"><number>24</number></property>
+        <property name="bottomMargin"><number>24</number></property>
+        <item>
+         <widget class="QLabel" name="sectionNetworkLabel">
+          <property name="text"><string>连接与密钥</string></property>
+         </widget>
+        </item>
+        <item>
+         <layout class="QVBoxLayout" name="settingsFormLayout">
+          <property name="spacing"><number>16</number></property>
+          <property name="leftMargin"><number>0</number></property>
+          <property name="topMargin"><number>0</number></property>
+          <property name="rightMargin"><number>0</number></property>
+          <property name="bottomMargin"><number>0</number></property>
+          <item>
+           <layout class="QHBoxLayout" name="settingsRowMerchant">
+            <property name="spacing"><number>10</number></property>
+            <item>
+             <widget class="QLabel" name="merchantNameLabel"><property name="text"><string>商户昵称</string></property></widget>
+            </item>
+            <item>
+             <widget class="QLabel" name="merchantNameValue"><property name="text"><string>Tenant</string></property></widget>
+            </item>
+            <item>
+             <spacer name="settingsRowMerchantSpacer">
+              <property name="orientation"><enum>Qt::Horizontal</enum></property>
+              <property name="sizeHint" stdset="0"><size><width>24</width><height>1</height></size></property>
+              <property name="sizeType"><enum>QSizePolicy::MinimumExpanding</enum></property>
+             </spacer>
+            </item>
+            <item>
+             <widget class="QLabel" name="websiteLabel"><property name="text"><string>充值网站</string></property></widget>
+            </item>
+            <item>
+             <widget class="QLabel" name="websiteValue"><property name="text"><string/></property></widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="settingsRowPassword">
+            <property name="spacing"><number>10</number></property>
+            <item>
+             <widget class="QLabel" name="passwordLabel"><property name="text"><string>通讯密钥</string></property></widget>
+            </item>
+            <item>
+             <widget class="QLineEdit" name="passwordEdit"/>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="settingsRowApiKey">
+            <property name="spacing"><number>10</number></property>
+            <item>
+             <widget class="QLabel" name="apiKeyLabel"><property name="text"><string>接口密钥</string></property></widget>
+            </item>
+            <item>
+             <widget class="QLineEdit" name="apiKeyEdit"/>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="settingsRowIpPort">
+            <property name="spacing"><number>10</number></property>
+            <item>
+             <widget class="QLabel" name="gatewayIpLabel"><property name="text"><string>服务器IP</string></property></widget>
+            </item>
+            <item>
+             <widget class="QLineEdit" name="gatewayAdvertisedIpEdit">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+                <horstretch>1</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QLabel" name="portLabel"><property name="text"><string>通讯端口</string></property></widget>
+            </item>
+            <item>
+             <widget class="QLineEdit" name="portEdit">
+              <property name="minimumSize"><size><width>88</width><height>0</height></size></property>
+              <property name="maximumSize"><size><width>120</width><height>16777215</height></size></property>
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <widget class="QWidget" name="gatewayIpAutoRow">
+            <layout class="QVBoxLayout" name="gatewayIpAutoRowLayout">
+             <property name="leftMargin"><number>0</number></property>
+             <property name="topMargin"><number>8</number></property>
+             <property name="rightMargin"><number>0</number></property>
+             <property name="bottomMargin"><number>0</number></property>
+             <property name="spacing"><number>0</number></property>
+             <item>
+              <widget class="QCheckBox" name="gatewayAdvertisedIpAutoDetectCheckBox">
+               <property name="text"><string>自动获取公网IP</string></property>
+               <property name="checked"><bool>true</bool></property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QLabel" name="sectionFeaturesLabel">
+          <property name="text"><string>运行选项</string></property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QFrame" name="settingsToggleArea">
+          <property name="frameShape"><enum>QFrame::NoFrame</enum></property>
+          <layout class="QGridLayout" name="settingsToggleAreaLayout">
+           <property name="horizontalSpacing"><number>32</number></property>
+           <property name="verticalSpacing"><number>18</number></property>
+           <property name="leftMargin"><number>16</number></property>
+           <property name="topMargin"><number>14</number></property>
+           <property name="rightMargin"><number>16</number></property>
+           <property name="bottomMargin"><number>14</number></property>
+           <property name="sizeConstraint"><enum>QLayout::SetMinimumSize</enum></property>
+          </layout>
+         </widget>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="settingsFooterLayout">
+          <property name="spacing"><number>12</number></property>
+          <property name="topMargin"><number>16</number></property>
+          <property name="bottomMargin"><number>0</number></property>
+          <item>
+           <widget class="QLabel" name="sectionUpdateLabel">
+            <property name="text"><string>在线更新</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="currentVersionLabel"><property name="text"><string>当前版本</string></property></widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="currentVersionValue"><property name="text"><string/></property></widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="checkUpdateButton">
+            <property name="text"><string>检查更新</string></property>
+            <property name="minimumSize"><size><width>100</width><height>28</height></size></property>
+           </widget>
+          </item>
+          <item>
+           <spacer name="footerBarSpacer">
+            <property name="orientation"><enum>Qt::Horizontal</enum></property>
+            <property name="sizeHint" stdset="0"><size><width>24</width><height>20</height></size></property>
+            <property name="sizeType"><enum>QSizePolicy::MinimumExpanding</enum></property>
+           </spacer>
+          </item>
+          <item>
+           <widget class="QPushButton" name="confirmSettingsButton">
+            <property name="text"><string>确定</string></property>
+            <property name="minimumSize"><size><width>120</width><height>36</height></size></property>
+           </widget>
+          </item>
+         </layout>
+        </item>
        </layout>
-      </item>
-      <item>
-       <layout class="QGridLayout" name="settingsOptionLayout">
-        <property name="horizontalSpacing"><number>48</number></property>
-        <property name="verticalSpacing"><number>16</number></property>
-       </layout>
-      </item>
-      <item>
-       <layout class="QHBoxLayout" name="confirmSettingsLayout">
-        <item><spacer name="horizontalSpacer_3"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
-        <item><widget class="QPushButton" name="confirmSettingsButton"><property name="text"><string>确定</string></property></widget></item>
-        <item><spacer name="horizontalSpacer_4"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
-       </layout>
-      </item>
-     </layout>
-    </widget>
+      </widget>
+     </item>
+     <item>
+      <spacer name="horizontalSpacerRight">
+       <property name="orientation"><enum>Qt::Horizontal</enum></property>
+       <property name="sizeHint" stdset="0"><size><width>0</width><height>20</height></size></property>
+       <property name="sizeType"><enum>QSizePolicy::Expanding</enum></property>
+      </spacer>
+     </item>
+    </layout>
    </item>
-   <item><spacer name="verticalSpacerBottom"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint" stdset="0"><size><width>20</width><height>40</height></size></property></spacer></item>
   </layout>
  </widget>
  <resources/>

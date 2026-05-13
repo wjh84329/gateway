@@ -20,11 +20,15 @@ public:
 
 signals:
     void configReloaded();
+    /// 设置页「检查更新」流程结束（含用户关闭提示），用于刷新主窗口版本状态
+    void gatewayUpdateCheckFinished();
 
 private:
     void LoadConfig();
     void SaveAndReloadConfig();
-    void ChangeGatewayId();
+    void OnCheckUpdateClicked();
+    void ApplyWebsiteValueDisplay(const QString &urlFromConfig);
+    void SyncGatewayAdvertisedIpFieldMode();
 
     Ui::SettingsPage *ui;
     QCheckBox *m_openLogCheckBox = nullptr;

@@ -3,6 +3,8 @@
 #include "appconfig.h"
 #include "machinecode.h"
 #include "pageutils.h"
+#include "checkboxstyle.h"
+#include "radiostyle.h"
 
 #include <QFrame>
 #include <QEvent>
@@ -18,8 +20,10 @@
 #include <QVBoxLayout>
 #include <QJsonDocument>
 #include <QApplication>
+#include <QAbstractItemView>
 #include <QSet>
 #include <QCalendarWidget>
+#include <QWheelEvent>
 
 namespace {
 QString ReadField(const QJsonObject &obj, const QStringList &names)
@@ -43,6 +47,90 @@ int ReadIntField(const QJsonObject &obj, const QStringList &names, int defaultVa
     }
     return defaultVal;
 }
+
+QString PartitionRadioStyleSheet()
+{
+    return QStringLiteral(
+               "QRadioButton { color: #3f3135; font-size: 13px; font-weight: 600; spacing: 8px; }"
+               "QRadioButton:checked { color: #8b4a53; }\n")
+        + GatewayRadioStyle::indicatorRules(18);
+}
+
+void InsertNormalizedGroupId(QSet<QString> *set, const QString &rawId)
+{
+    if (!set || rawId.trimmed().isEmpty()) {
+        return;
+    }
+    const QString t = rawId.trimmed();
+    set->insert(t);
+    bool ok = false;
+    const qint64 n = t.toLongLong(&ok);
+    if (ok) {
+        set->insert(QString::number(n));
+    }
+}
+
+bool GroupIdSetContainsRowId(const QSet<QString> &set, const QString &rowId)
+{
+    const QString r = rowId.trimmed();
+    if (set.contains(r)) {
+        return true;
+    }
+    bool ok = false;
+    const qint64 n = r.toLongLong(&ok);
+    return ok && set.contains(QString::number(n));
+}
+
+/// TenantServer GetPartitions 序列化多为 camelCase（groups）；实体为 PartitionGroups
+QJsonValue ExtractGroupsArrayValue(const QJsonObject &partitionObject)
+{
+    static const QStringList kKeys = {
+        QStringLiteral("Groups"),
+        QStringLiteral("groups"),
+        QStringLiteral("PartitionGroups"),
+        QStringLiteral("partitionGroups"),
+    };
+    for (const auto &key : kKeys) {
+        const QJsonValue v = partitionObject.value(key);
+        if (v.isArray()) {
+            return v;
+        }
+    }
+    return {};
+}
+
+/// 与分区模板对话框一致：未展开下拉时不处理滚轮（交给外层 QScrollArea），展开后列表可用滚轮改选项
+class PartitionDialogComboBox final : public QComboBox
+{
+public:
+    explicit PartitionDialogComboBox(QWidget *parent = nullptr)
+        : QComboBox(parent)
+    {
+        setMaxVisibleItems(20);
+        setFocusPolicy(Qt::StrongFocus);
+    }
+
+protected:
+    void wheelEvent(QWheelEvent *e) override
+    {
+        if (!view()->isVisible()) {
+            e->ignore();
+            return;
+        }
+        QComboBox::wheelEvent(e);
+    }
+
+    void showPopup() override
+    {
+        QComboBox::showPopup();
+        if (QAbstractItemView *v = view()) {
+            if (QWidget *w = v->window()) {
+                w->raise();
+            }
+        }
+    }
+};
+
 }
 
 // 暗红主题样式 - 与主窗口一致
@@ -53,7 +141,7 @@ QPushButton {
     border: none;
     border-radius: 4px;
     font-size: 13px;
-    font-weight: 600;
+    font-weight: normal;
     padding: 6px 24px;
 }
 QPushButton:hover { background: #9a5660; }
@@ -67,7 +155,7 @@ QPushButton {
     border: 1px solid #dccbce;
     border-radius: 4px;
     font-size: 13px;
-    font-weight: 600;
+    font-weight: normal;
     padding: 6px 24px;
 }
 QPushButton:hover { background: #f5edef; }
@@ -123,19 +211,29 @@ PartitionDialog::PartitionDialog(const QJsonObject &partitionObject,
     m_partitionId = ReadField(partitionObject, {"Id", "id"});
 
     setWindowTitle(IsEditMode() ? QStringLiteral("编辑分区") : QStringLiteral("添加分区"));
-    setFixedSize(580, 680);
+    setFixedSize(680, 820);
     setModal(true);
-    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+    setWindowFlags(Qt::Window | Qt::Dialog | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_DeleteOnClose, false);
 
     SetupUi();
+    connect(m_templateCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &PartitionDialog::OnTemplateIndexChanged);
 
     if (IsEditMode()) {
         PopulateFields();
     } else {
+        m_partitionType = TemplateTypeForComboIndex(0);
         m_radioNoUpdate->setChecked(true);
-        m_dateTimeEdit->setDateTime(QDateTime::currentDateTime());
+        const QDateTime now = QDateTime::currentDateTime();
+        m_dateTimeEdit->setDateTime(now);
+        m_deleteDateTimeEdit->setDateTime(now);
+        m_changeDateTimeEdit->setDateTime(now);
+        m_scanWebRadio->setChecked(true);
+        m_ybEggOffRadio->setChecked(true);
+        m_renameFieldsWrap->setVisible(false);
     }
+    OnTemplateIndexChanged(m_templateCombo->currentIndex());
 }
 
 PartitionDialog::~PartitionDialog() = default;
@@ -182,7 +280,7 @@ void PartitionDialog::SetupUi()
 
     auto *titleLabel = new QLabel(IsEditMode() ? QStringLiteral("编辑分区") : QStringLiteral("添加分区"), m_titleWidget);
     titleLabel->setStyleSheet(QStringLiteral(
-        "color: #ffffff; font-size: 15px; font-weight: 600; background: transparent;"));
+        "color: #ffffff; font-size: 15px; font-weight: normal; background: transparent;"));
     titleLayout->addWidget(titleLabel);
     titleLayout->addStretch();
 
@@ -190,7 +288,7 @@ void PartitionDialog::SetupUi()
     closeButton->setFixedSize(32, 32);
     closeButton->setCursor(Qt::PointingHandCursor);
     closeButton->setStyleSheet(QStringLiteral(
-        "QPushButton { color: #ffffff; background: transparent; border: none; border-radius: 16px; font-size: 14px; }"
+        "QPushButton { color: #ffffff; background: transparent; border: none; border-radius: 16px; font-size: 14px; font-weight: normal; }"
         "QPushButton:hover { background: rgba(255,255,255,0.2); }"));
     connect(closeButton, &QPushButton::clicked, this, &QDialog::reject);
     titleLayout->addWidget(closeButton);
@@ -208,19 +306,21 @@ void PartitionDialog::SetupUi()
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"));
 
     auto *formWidget = new QWidget(scrollArea);
-    formWidget->setStyleSheet(QStringLiteral("background: #ffffff;"));
+    formWidget->setStyleSheet(QStringLiteral("background: #ffffff; border: none;"));
+    scrollArea->viewport()->setStyleSheet(QStringLiteral("background: #ffffff; border: none;"));
     auto *formLayout = new QVBoxLayout(formWidget);
-    formLayout->setContentsMargins(24, 18, 24, 14);
+    formLayout->setContentsMargins(32, 26, 32, 22);
+    formLayout->setSpacing(22);
 
     // 通用小标签样式 - 更现代简洁
     const QString sectionCardStyle = QStringLiteral(
         "background: #fcf7f9;"
-        "border: 1px solid #efe4e7;"
-        "border-radius: 10px;");
+        "border: none;"
+        "border-radius: 12px;");
     const QString sectionTitleStyle = QStringLiteral(
         "color: #5a3a41;"
         "font-size: 14px;"
-        "font-weight: 700;"
+        "font-weight: normal;"
         "background: transparent;");
     const QString sectionHintStyle = QStringLiteral(
         "color: #ad8e95;"
@@ -229,15 +329,17 @@ void PartitionDialog::SetupUi()
     const QString labelStyle = QStringLiteral(
         "color: #6a4b52;"
         "font-size: 12px;"
-        "font-weight: 600;"
+        "font-weight: normal;"
         "background: transparent;"
     );
 
     auto createSection = [&](const QString &title, const QString &hint) {
         auto *card = new QFrame(formWidget);
+        card->setFrameShape(QFrame::NoFrame);
         card->setStyleSheet(sectionCardStyle);
         auto *layout = new QVBoxLayout(card);
-        layout->setContentsMargins(16, 12, 16, 16);
+        layout->setContentsMargins(20, 16, 20, 18);
+        layout->setSpacing(12);
 
         auto *titleRow = new QHBoxLayout();
         titleRow->setContentsMargins(0, 0, 0, 0);
@@ -263,73 +365,71 @@ void PartitionDialog::SetupUi()
         return qMakePair(card, layout);
     };
 
-    // 1. 分区名称
+    const QString dateTimeFieldStyle = QStringLiteral(
+        "QDateTimeEdit { min-height: 38px; border: 1px solid #d9c8cb; border-radius: 8px; padding: 0 12px; font-size: 13px; color: #3f3135; background: #fffdfd; }"
+        "QDateTimeEdit:focus { border: 1px solid #a35a66; background: #ffffff; }"
+        "QCalendarWidget { background: #ffffff; }"
+        "QCalendarWidget QToolButton { color: #4a2d34; font-size: 14px; font-weight: normal; background: #fcf7f8; border: none; padding: 6px; }"
+        "QCalendarWidget QToolButton:hover { background: #f4e8ea; }"
+        "QCalendarWidget QMenu { background: #ffffff; }"
+        "QCalendarWidget QSpinBox { color: #4a2d34; font-size: 13px; font-weight: 600; background: #ffffff; }"
+        "QCalendarWidget QWidget#qt_calendar_navigationbar { background: #fcf7f8; }");
+
+    // 1. 基础信息
     {
-        auto section = createSection(QStringLiteral("基础信息"), QStringLiteral("分区名称、模板与开区时间"));
-        auto *lbl = new QLabel(QStringLiteral("分区名称"), section.first);
-        lbl->setStyleSheet(labelStyle);
-        m_nameEdit = new QLineEdit(section.first);
+        auto section = createSection(QStringLiteral("基础信息"), QString());
+        QWidget *card = section.first;
+        QVBoxLayout *vl = section.second;
+
+        auto *nameLbl = new QLabel(QStringLiteral("分区名称"), card);
+        nameLbl->setStyleSheet(labelStyle);
+        m_nameEdit = new QLineEdit(card);
         m_nameEdit->setPlaceholderText(QStringLiteral("请输入分区名称"));
-        m_nameEdit->setStyleSheet(QLatin1StringView(kInputFieldStyle));
-        section.second->addWidget(lbl);
-        section.second->addWidget(m_nameEdit);
+        m_nameEdit->setStyleSheet(QLatin1String(kInputFieldStyle));
+        vl->addWidget(nameLbl);
+        vl->addWidget(m_nameEdit);
+        auto *nameTip = new QLabel(QStringLiteral("3～30 个字符，请勿输入特殊符号"), card);
+        nameTip->setStyleSheet(sectionHintStyle);
+        vl->addWidget(nameTip);
 
-        auto *templateLbl = new QLabel(QStringLiteral("使用模板"), section.first);
-        templateLbl->setStyleSheet(labelStyle);
-        m_templateCombo = new QComboBox(section.first);
-        m_templateCombo->setStyleSheet(QLatin1StringView(kInputFieldStyle));
-        for (int i = 0; i < m_templates.size(); ++i) {
-            const QJsonObject t = m_templates.at(i).toObject();
-            const QString display = QStringLiteral("[%1] %2").arg(ReadField(t, {"Id", "id"}), ReadField(t, {"Name", "name"}));
-            m_templateCombo->addItem(display);
-            m_templateCombo->setItemData(i, ReadField(t, {"Id", "id"}), Qt::UserRole);
-        }
-        section.second->addWidget(templateLbl);
-        section.second->addWidget(m_templateCombo);
+        m_changeNameInTimeCheck = new QCheckBox(QStringLiteral("在指定时间更改分区名称"), card);
+        m_changeNameInTimeCheck->setStyleSheet(
+            QStringLiteral(
+                "QCheckBox { color: #3f3135; font-size: 13px; font-weight: 600; spacing: 8px; }"
+                "QCheckBox:checked { color: #8b4a53; }\n")
+            + GatewayCheckboxStyle::indicatorRules(18));
+        vl->addWidget(m_changeNameInTimeCheck);
 
-        auto *timeLbl = new QLabel(QStringLiteral("开区时间"), section.first);
-        timeLbl->setStyleSheet(labelStyle);
-        m_dateTimeEdit = new QDateTimeEdit(QDateTime::currentDateTime(), section.first);
-        m_dateTimeEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
-        m_dateTimeEdit->setCalendarPopup(true);
-        // 合并输入框与日历弹窗样式，让年月日清晰可见
-        m_dateTimeEdit->setStyleSheet(QStringLiteral(
-            "QDateTimeEdit { min-height: 38px; border: 1px solid #d9c8cb; border-radius: 8px; padding: 0 12px; font-size: 13px; color: #3f3135; background: #fffdfd; }"
-            "QDateTimeEdit:focus { border: 1px solid #a35a66; background: #ffffff; }"
-            "QCalendarWidget { background: #ffffff; }"
-            "QCalendarWidget QToolButton { color: #4a2d34; font-size: 14px; font-weight: 700; background: #fcf7f8; border: none; padding: 6px; }"
-            "QCalendarWidget QToolButton:hover { background: #f4e8ea; }"
-            "QCalendarWidget QMenu { background: #ffffff; }"
-            "QCalendarWidget QSpinBox { color: #4a2d34; font-size: 13px; font-weight: 600; background: #ffffff; }"
-            "QCalendarWidget QWidget#qt_calendar_navigationbar { background: #fcf7f8; }"
-        ));
-        section.second->addWidget(timeLbl);
-        section.second->addWidget(m_dateTimeEdit);
+        m_renameFieldsWrap = new QWidget(card);
+        m_renameFieldsWrap->setAttribute(Qt::WA_StyledBackground, true);
+        m_renameFieldsWrap->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+        auto *rw = new QVBoxLayout(m_renameFieldsWrap);
+        rw->setContentsMargins(8, 4, 0, 4);
+        rw->setSpacing(10);
+        auto *cnLbl = new QLabel(QStringLiteral("更改名称"), m_renameFieldsWrap);
+        cnLbl->setStyleSheet(labelStyle);
+        m_changeNameEdit = new QLineEdit(m_renameFieldsWrap);
+        m_changeNameEdit->setPlaceholderText(QStringLiteral("定时切换后的分区名称"));
+        m_changeNameEdit->setStyleSheet(QLatin1String(kInputFieldStyle));
+        rw->addWidget(cnLbl);
+        rw->addWidget(m_changeNameEdit);
+        auto *ctLbl = new QLabel(QStringLiteral("更改时间"), m_renameFieldsWrap);
+        ctLbl->setStyleSheet(labelStyle);
+        m_changeDateTimeEdit = new QDateTimeEdit(QDateTime::currentDateTime(), m_renameFieldsWrap);
+        m_changeDateTimeEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        m_changeDateTimeEdit->setCalendarPopup(true);
+        m_changeDateTimeEdit->setStyleSheet(dateTimeFieldStyle);
+        rw->addWidget(ctLbl);
+        rw->addWidget(m_changeDateTimeEdit);
+        vl->addWidget(m_renameFieldsWrap);
+        connect(m_changeNameInTimeCheck, &QCheckBox::toggled, m_renameFieldsWrap, &QWidget::setVisible);
 
-        // 服务器 IP
-        auto *serverIpLbl = new QLabel(QStringLiteral("服务器 IP"), section.first);
-        serverIpLbl->setStyleSheet(labelStyle);
-        m_serverIpEdit = new QLineEdit(section.first);
-        m_serverIpEdit->setPlaceholderText(QStringLiteral("如：127.0.0.1"));
-        m_serverIpEdit->setStyleSheet(QLatin1StringView(kInputFieldStyle));
-        section.second->addWidget(serverIpLbl);
-        section.second->addWidget(m_serverIpEdit);
-
-        // 服务器端口
-        auto *serverPortLbl = new QLabel(QStringLiteral("服务器端口"), section.first);
-        serverPortLbl->setStyleSheet(labelStyle);
-        m_serverPortEdit = new QLineEdit(section.first);
-        m_serverPortEdit->setPlaceholderText(QStringLiteral("如：7000"));
-        m_serverPortEdit->setStyleSheet(QLatin1StringView(kInputFieldStyle));
-        section.second->addWidget(serverPortLbl);
-        section.second->addWidget(m_serverPortEdit);
-
-        formLayout->addWidget(section.first);
+        formLayout->addWidget(card);
     }
 
     // 2. 分组选择
     {
-        auto section = createSection(QStringLiteral("分组绑定"), QStringLiteral("支持多选，勾选后将同步到该分区"));
+        auto section = createSection(QStringLiteral("分组绑定"), QString());
         auto *lbl = new QLabel(QStringLiteral("所属分组"), section.first);
         lbl->setStyleSheet(labelStyle);
         m_groupTable = new QTableWidget(section.first);
@@ -359,7 +459,7 @@ void PartitionDialog::SetupUi()
         m_groupTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
         m_groupTable->setStyleSheet(QStringLiteral(
             "QTableWidget {"
-            "border: 1px solid #e8dbdd;"
+            "border: none;"
             "border-radius: 8px;"
             "gridline-color: transparent;"
             "font-size: 13px;"
@@ -371,60 +471,172 @@ void PartitionDialog::SetupUi()
             "QHeaderView::section {"
             "background: #f8f1f3;"
             "color: #6b4b52;"
-            "font-weight: 600;"
+            "font-weight: normal;"
             "border: none;"
             "border-bottom: 1px solid #ede1e4;"
             "padding: 8px;"
             "}"));
         m_groupTable->setColumnWidth(0, 70);
-        m_groupTable->setFixedHeight(150);
+        m_groupTable->setFixedHeight(160);
         section.second->addWidget(lbl);
         section.second->addWidget(m_groupTable);
         formLayout->addWidget(section.first);
     }
 
-    // 3. 安装路径
+    // 3. 安装路径（MachineCode 由接口层自动携带，不在此填写）
     {
-        auto section = createSection(QStringLiteral("部署设置"), QStringLiteral("安装路径与脚本更新策略"));
-        auto *lbl = new QLabel(QStringLiteral("安装路径"), section.first);
-        lbl->setStyleSheet(labelStyle);
+        auto section = createSection(QStringLiteral("安装路径"), QString());
+        QWidget *card = section.first;
+        m_machinePathCard = card;
+        QVBoxLayout *vl = section.second;
+
+        auto *pathLbl = new QLabel(QStringLiteral("安装路径"), card);
+        pathLbl->setStyleSheet(labelStyle);
         auto *pathLayout = new QHBoxLayout();
         pathLayout->setSpacing(8);
-        m_pathEdit = new QLineEdit(section.first);
-        m_pathEdit->setPlaceholderText(QStringLiteral("请选择安装路径或手动输入"));
-        m_pathEdit->setStyleSheet(QLatin1StringView(kInputFieldStyle));
-        m_browseButton = new QPushButton(QStringLiteral("浏览"), section.first);
+        m_pathEdit = new QLineEdit(card);
+        m_pathEdit->setPlaceholderText(QStringLiteral("分区安装脚本目录或 INI 文件存放路径"));
+        m_pathEdit->setStyleSheet(QLatin1String(kInputFieldStyle));
+        m_browseButton = new QPushButton(QStringLiteral("浏览"), card);
         m_browseButton->setFixedSize(76, 38);
         m_browseButton->setCursor(Qt::PointingHandCursor);
         m_browseButton->setStyleSheet(kButtonPrimaryStyle);
         connect(m_browseButton, &QPushButton::clicked, this, &PartitionDialog::OnBrowsePath);
         pathLayout->addWidget(m_pathEdit, 1);
         pathLayout->addWidget(m_browseButton);
-        section.second->addWidget(lbl);
-        section.second->addLayout(pathLayout);
+        vl->addWidget(pathLbl);
+        vl->addLayout(pathLayout);
 
-        auto *lblCmd = new QLabel(QStringLiteral("脚本命令"), section.first);
+        formLayout->addWidget(card);
+    }
+
+    // 4. 模板与运营设置
+    {
+        auto section = createSection(QStringLiteral("模板与运营"), QString());
+        QWidget *card = section.first;
+        QVBoxLayout *vl = section.second;
+
+        auto *templateLbl = new QLabel(QStringLiteral("模板"), card);
+        templateLbl->setStyleSheet(labelStyle);
+        m_templateCombo = new PartitionDialogComboBox(card);
+        m_templateCombo->setStyleSheet(QLatin1String(kInputFieldStyle));
+        for (int i = 0; i < m_templates.size(); ++i) {
+            const QJsonObject t = m_templates.at(i).toObject();
+            const QString display = QStringLiteral("[%1] %2").arg(ReadField(t, {QStringLiteral("Id"), QStringLiteral("id")}),
+                                                                 ReadField(t, {QStringLiteral("Name"), QStringLiteral("name")}));
+            m_templateCombo->addItem(display);
+            m_templateCombo->setItemData(i, ReadField(t, {QStringLiteral("Id"), QStringLiteral("id")}), Qt::UserRole);
+        }
+        vl->addWidget(templateLbl);
+        vl->addWidget(m_templateCombo);
+
+        m_ybEggWidget = new QWidget(card);
+        auto *eggLay = new QVBoxLayout(m_ybEggWidget);
+        eggLay->setContentsMargins(0, 0, 0, 0);
+        eggLay->setSpacing(8);
+        auto *eggLbl = new QLabel(QStringLiteral("元宝蛋"), m_ybEggWidget);
+        eggLbl->setStyleSheet(labelStyle);
+        auto *eggRow = new QWidget(m_ybEggWidget);
+        auto *eggH = new QHBoxLayout(eggRow);
+        eggH->setContentsMargins(0, 0, 0, 0);
+        eggH->setSpacing(16);
+        const QString radioStyle = PartitionRadioStyleSheet();
+        m_ybEggOnRadio = new QRadioButton(QStringLiteral("开启"), eggRow);
+        m_ybEggOffRadio = new QRadioButton(QStringLiteral("关闭"), eggRow);
+        m_ybEggOnRadio->setStyleSheet(radioStyle);
+        m_ybEggOffRadio->setStyleSheet(radioStyle);
+        eggH->addWidget(m_ybEggOnRadio);
+        eggH->addWidget(m_ybEggOffRadio);
+        eggH->addStretch();
+        m_ybEggGroup = new QButtonGroup(this);
+        m_ybEggGroup->addButton(m_ybEggOnRadio, 1);
+        m_ybEggGroup->addButton(m_ybEggOffRadio, 0);
+        eggLay->addWidget(eggLbl);
+        eggLay->addWidget(eggRow);
+        vl->addWidget(m_ybEggWidget);
+
+        auto *scanLbl = new QLabel(QStringLiteral("充值方式（扫码）"), card);
+        scanLbl->setStyleSheet(labelStyle);
+        auto *scanRow = new QWidget(card);
+        auto *scanH = new QHBoxLayout(scanRow);
+        scanH->setContentsMargins(0, 0, 0, 0);
+        scanH->setSpacing(16);
+        m_scanWebRadio = new QRadioButton(QStringLiteral("网页扫码"), scanRow);
+        m_scanGameRadio = new QRadioButton(QStringLiteral("游戏内扫码"), scanRow);
+        m_scanBothRadio = new QRadioButton(QStringLiteral("以上两者"), scanRow);
+        for (auto *rb : {m_scanWebRadio, m_scanGameRadio, m_scanBothRadio})
+            rb->setStyleSheet(radioStyle);
+        scanH->addWidget(m_scanWebRadio);
+        scanH->addWidget(m_scanGameRadio);
+        scanH->addWidget(m_scanBothRadio);
+        scanH->addStretch();
+        m_scanButtonGroup = new QButtonGroup(this);
+        m_scanButtonGroup->addButton(m_scanWebRadio, 2);
+        m_scanButtonGroup->addButton(m_scanGameRadio, 0);
+        m_scanButtonGroup->addButton(m_scanBothRadio, 1);
+        vl->addWidget(scanLbl);
+        vl->addWidget(scanRow);
+
+        formLayout->addWidget(card);
+    }
+
+    // 5. 定时开区 / 删区 / 脚本策略
+    {
+        auto section = createSection(QStringLiteral("开区与脚本"), QString());
+        QWidget *card = section.first;
+        QVBoxLayout *vl = section.second;
+
+        auto *timeLbl = new QLabel(QStringLiteral("定时开区"), card);
+        timeLbl->setStyleSheet(labelStyle);
+        m_dateTimeEdit = new QDateTimeEdit(QDateTime::currentDateTime(), card);
+        m_dateTimeEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        m_dateTimeEdit->setCalendarPopup(true);
+        m_dateTimeEdit->setStyleSheet(dateTimeFieldStyle);
+        vl->addWidget(timeLbl);
+        vl->addWidget(m_dateTimeEdit);
+        auto *timeTip = new QLabel(QStringLiteral("到达设定时间后开放充值；开区前会按策略加载脚本。"), card);
+        timeTip->setStyleSheet(sectionHintStyle);
+        timeTip->setWordWrap(true);
+        vl->addWidget(timeTip);
+
+        m_scheduledDeleteCheck = new QCheckBox(QStringLiteral("系统将在您指定的时间删除分区"), card);
+        m_scheduledDeleteCheck->setStyleSheet(
+            QStringLiteral(
+                "QCheckBox { color: #3f3135; font-size: 13px; font-weight: 600; spacing: 8px; }"
+                "QCheckBox:checked { color: #8b4a53; }\n")
+            + GatewayCheckboxStyle::indicatorRules(18));
+        vl->addWidget(m_scheduledDeleteCheck);
+        auto *delLbl = new QLabel(QStringLiteral("删区时间"), card);
+        delLbl->setStyleSheet(labelStyle);
+        m_deleteDateTimeEdit = new QDateTimeEdit(QDateTime::currentDateTime(), card);
+        m_deleteDateTimeEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        m_deleteDateTimeEdit->setCalendarPopup(true);
+        m_deleteDateTimeEdit->setStyleSheet(dateTimeFieldStyle);
+        vl->addWidget(delLbl);
+        vl->addWidget(m_deleteDateTimeEdit);
+
+        m_scriptCmdWidget = new QWidget(card);
+        m_scriptCmdWidget->setAttribute(Qt::WA_StyledBackground, true);
+        m_scriptCmdWidget->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+        auto *scvl = new QVBoxLayout(m_scriptCmdWidget);
+        scvl->setContentsMargins(0, 0, 0, 0);
+        scvl->setSpacing(8);
+        auto *lblCmd = new QLabel(QStringLiteral("脚本更新（热血/传世）"), m_scriptCmdWidget);
         lblCmd->setStyleSheet(labelStyle);
-        lbl->setStyleSheet(labelStyle);
-        auto *radioWidget = new QWidget(section.first);
-        radioWidget->setStyleSheet(QStringLiteral("background: transparent;"));
+        auto *radioWidget = new QWidget(m_scriptCmdWidget);
+        radioWidget->setAttribute(Qt::WA_StyledBackground, true);
+        radioWidget->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
         auto *radioLayout = new QHBoxLayout(radioWidget);
         radioLayout->setContentsMargins(0, 0, 0, 0);
         radioLayout->setSpacing(16);
 
+        const QString radioStyle = PartitionRadioStyleSheet();
         m_radioNoUpdate = new QRadioButton(QStringLiteral("不更新脚本"), radioWidget);
-        m_radioOnlyRecharge = new QRadioButton(QStringLiteral("仅更新充值"), radioWidget);
+        m_radioOnlyRecharge = new QRadioButton(QStringLiteral("仅更新充值脚本"), radioWidget);
         m_radioAllUpdate = new QRadioButton(QStringLiteral("全部更新"), radioWidget);
-
-        const QString radioStyle = QStringLiteral(
-            "QRadioButton { color: #3f3135; font-size: 13px; font-weight: 600; spacing: 8px; }"
-            "QRadioButton:checked { color: #8b4a53; }"
-            "QRadioButton::indicator { width: 18px; height: 18px; border-radius: 9px; border: 2px solid #c0aaaa; background: #ffffff; }"
-            "QRadioButton::indicator:checked { border: 2px solid #8b4a53; background: #8b4a53; }");
         m_radioNoUpdate->setStyleSheet(radioStyle);
         m_radioOnlyRecharge->setStyleSheet(radioStyle);
         m_radioAllUpdate->setStyleSheet(radioStyle);
-
         radioLayout->addWidget(m_radioNoUpdate);
         radioLayout->addWidget(m_radioOnlyRecharge);
         radioLayout->addWidget(m_radioAllUpdate);
@@ -435,18 +647,15 @@ void PartitionDialog::SetupUi()
         m_cmdTypeGroup->addButton(m_radioOnlyRecharge, 1);
         m_cmdTypeGroup->addButton(m_radioAllUpdate, 2);
 
-        section.second->addWidget(lblCmd);
-        section.second->addWidget(radioWidget);
+        scvl->addWidget(lblCmd);
+        scvl->addWidget(radioWidget);
+        auto *cmdTip = new QLabel(QStringLiteral("可与定时开区一并生效；也可稍后在分区管理中加载脚本。"), m_scriptCmdWidget);
+        cmdTip->setStyleSheet(sectionHintStyle);
+        cmdTip->setWordWrap(true);
+        scvl->addWidget(cmdTip);
+        vl->addWidget(m_scriptCmdWidget);
 
-        m_ybEggCheck = new QCheckBox(QStringLiteral("开启元宝蛋"), section.first);
-        m_ybEggCheck->setStyleSheet(QStringLiteral(
-            "QCheckBox { color: #3f3135; font-size: 13px; font-weight: 600; spacing: 8px; }"
-            "QCheckBox:checked { color: #8b4a53; }"
-            "QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px; border: 2px solid #c0aaaa; background: #ffffff; }"
-            "QCheckBox::indicator:checked { background: #8b4a53; border-color: #8b4a53; }"
-            "QCheckBox::indicator:hover { border-color: #a35a66; }"));
-        section.second->addWidget(m_ybEggCheck);
-        formLayout->addWidget(section.first);
+        formLayout->addWidget(card);
     }
 
     formLayout->addStretch();
@@ -489,7 +698,7 @@ bool PartitionDialog::eventFilter(QObject *watched, QEvent *event)
             auto *mouseEvent = static_cast<QMouseEvent *>(event);
             if (mouseEvent->button() == Qt::LeftButton) {
                 m_dragging = true;
-                m_dragOffset = mouseEvent->globalPosition().toPoint() - frameGeometry().topLeft();
+                m_dragOffset = UiHelpers::GlobalPosFromMouseEvent(mouseEvent) - frameGeometry().topLeft();
                 return true;
             }
             break;
@@ -497,7 +706,7 @@ bool PartitionDialog::eventFilter(QObject *watched, QEvent *event)
         case QEvent::MouseMove: {
             if (m_dragging) {
                 auto *mouseEvent = static_cast<QMouseEvent *>(event);
-                move(mouseEvent->globalPosition().toPoint() - m_dragOffset);
+                move(UiHelpers::GlobalPosFromMouseEvent(mouseEvent) - m_dragOffset);
                 return true;
             }
             break;
@@ -513,73 +722,174 @@ bool PartitionDialog::eventFilter(QObject *watched, QEvent *event)
     return QDialog::eventFilter(watched, event);
 }
 
+int PartitionDialog::TemplateTypeForComboIndex(int index) const
+{
+    if (index < 0 || !m_templateCombo || index >= m_templateCombo->count())
+        return 1;
+    const QString tid = m_templateCombo->itemData(index, Qt::UserRole).toString().trimmed();
+    for (const QJsonValue &v : m_templates) {
+        if (!v.isObject())
+            continue;
+        const QJsonObject o = v.toObject();
+        if (ReadField(o, {QStringLiteral("Id"), QStringLiteral("id")}) == tid)
+            return ReadIntField(o, {QStringLiteral("Type"), QStringLiteral("type")}, 1);
+    }
+    return 1;
+}
+
+void PartitionDialog::SyncPartitionKindUi()
+{
+    const int t = m_partitionType;
+    const bool showMir = (t == 1 || t == 2 || t == 3 || t == 6);
+    if (m_machinePathCard)
+        m_machinePathCard->setVisible(showMir);
+    if (m_ybEggWidget)
+        m_ybEggWidget->setVisible(t == 1 || t == 2);
+    if (m_scriptCmdWidget)
+        m_scriptCmdWidget->setVisible(t == 1 || t == 2);
+    if (m_pathEdit) {
+        if (t == 4 || t == 5)
+            m_pathEdit->setPlaceholderText(QStringLiteral("SQL / Web 等类型可留空"));
+        else
+            m_pathEdit->setPlaceholderText(QStringLiteral("分区安装脚本目录或 INI 文件存放路径"));
+    }
+}
+
+void PartitionDialog::OnTemplateIndexChanged(int index)
+{
+    Q_UNUSED(index);
+    if (!IsEditMode())
+        m_partitionType = TemplateTypeForComboIndex(m_templateCombo->currentIndex());
+    SyncPartitionKindUi();
+}
+
 void PartitionDialog::PopulateFields()
 {
-    // 名称
-    m_nameEdit->setText(ReadField(m_partitionObject, {"Name", "name", "PartitionName"}));
+    const int rawType = ReadIntField(m_partitionObject, {QStringLiteral("Type"), QStringLiteral("type")}, -1);
+    m_partitionType = (rawType >= 0) ? rawType : TemplateTypeForComboIndex(m_templateCombo->currentIndex());
 
-    // 路径 - 归一化为 Windows 右斜杠
-    QString rawPath = ReadField(m_partitionObject, {"ScriptPath", "scriptPath", "PartitionPath", "partitionPath"});
+    m_nameEdit->setText(ReadField(m_partitionObject,
+                                  {QStringLiteral("Name"), QStringLiteral("name"), QStringLiteral("PartitionName")}));
+
+    QString rawPath = ReadField(m_partitionObject,
+                                {QStringLiteral("ScriptPath"), QStringLiteral("scriptPath"), QStringLiteral("PartitionPath"),
+                                 QStringLiteral("partitionPath")});
     rawPath.replace(QLatin1Char('/'), QLatin1Char('\\'));
     m_pathEdit->setText(rawPath);
 
-    // 模板
-    const QString templateId = ReadField(m_partitionObject, {"TemplateId", "templateId"});
+    QString templateIdStr = ReadField(m_partitionObject, {QStringLiteral("TemplateId"), QStringLiteral("templateId")});
+    const int templateIdNum = ReadIntField(m_partitionObject, {QStringLiteral("TemplateId"), QStringLiteral("templateId")}, -1);
+    if (templateIdStr.isEmpty() && templateIdNum >= 0)
+        templateIdStr = QString::number(templateIdNum);
     for (int i = 0; i < m_templateCombo->count(); ++i) {
-        if (m_templateCombo->itemData(i, Qt::UserRole).toString() == templateId) {
+        const QVariant data = m_templateCombo->itemData(i, Qt::UserRole);
+        bool ok = false;
+        const int tid = data.toInt(&ok);
+        if (ok && templateIdNum >= 0 && tid == templateIdNum) {
+            m_templateCombo->setCurrentIndex(i);
+            break;
+        }
+        if (data.toString() == templateIdStr) {
             m_templateCombo->setCurrentIndex(i);
             break;
         }
     }
 
-    // 服务器 IP
-    m_serverIpEdit->setText(ReadField(m_partitionObject, {"ServerIp", "serverIp", "ServerIP", "ServerAddress"}));
+    const bool changeInTime = m_partitionObject.value(QStringLiteral("IsChangeInTime")).toBool()
+                              || m_partitionObject.value(QStringLiteral("isChangeInTime")).toBool();
+    m_changeNameInTimeCheck->setChecked(changeInTime);
+    m_changeNameEdit->setText(ReadField(m_partitionObject, {QStringLiteral("UseName"), QStringLiteral("useName")}));
+    const QString changeDate = ReadField(m_partitionObject, {QStringLiteral("ChangeDate"), QStringLiteral("changeDate")});
+    if (!changeDate.isEmpty()) {
+        QDateTime dt = QDateTime::fromString(changeDate, Qt::ISODateWithMs);
+        if (!dt.isValid())
+            dt = QDateTime::fromString(changeDate, Qt::ISODate);
+        if (!dt.isValid())
+            dt = QDateTime::fromString(changeDate, QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        if (!dt.isValid())
+            dt = QDateTime::fromString(changeDate, QStringLiteral("yyyy-MM-ddTHH:mm:ss"));
+        if (dt.isValid())
+            m_changeDateTimeEdit->setDateTime(dt);
+    }
+    m_renameFieldsWrap->setVisible(changeInTime);
 
-    // 服务器端口
-    const int portVal = ReadIntField(m_partitionObject, {"ServerPort", "serverPort", "ServerPORT", "Port", "ServerAddressPort"}, 0);
-    if (portVal > 0)
-        m_serverPortEdit->setText(QString::number(portVal));
+    const int scanVal = ReadIntField(m_partitionObject, {QStringLiteral("Scan"), QStringLiteral("scan")}, 2);
+    if (auto *b = m_scanButtonGroup->button(scanVal))
+        b->setChecked(true);
+    else
+        m_scanWebRadio->setChecked(true);
 
-    // 开区时间
-    const QString useDate = ReadField(m_partitionObject, {"UseDate", "useDate"});
+    const bool yb = m_partitionObject.value(QStringLiteral("YbEgg")).toBool()
+                    || m_partitionObject.value(QStringLiteral("ybEgg")).toBool();
+    if (yb)
+        m_ybEggOnRadio->setChecked(true);
+    else
+        m_ybEggOffRadio->setChecked(true);
+
+    const QString useDate = ReadField(m_partitionObject, {QStringLiteral("UseDate"), QStringLiteral("useDate")});
     if (!useDate.isEmpty()) {
-        QDateTime dt = QDateTime::fromString(useDate, Qt::ISODate);
+        QDateTime dt = QDateTime::fromString(useDate, Qt::ISODateWithMs);
+        if (!dt.isValid())
+            dt = QDateTime::fromString(useDate, Qt::ISODate);
+        if (!dt.isValid())
+            dt = QDateTime::fromString(useDate, QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        if (!dt.isValid())
+            dt = QDateTime::fromString(useDate, QStringLiteral("yyyy-MM-ddTHH:mm:ss"));
         if (dt.isValid())
             m_dateTimeEdit->setDateTime(dt);
     }
 
-    // 脚本类型
-    int cmdType = ReadIntField(m_partitionObject, {"PartitionCmdType", "partitionCmdType"}, 2);
-    auto *btn = m_cmdTypeGroup->button(cmdType);
-    if (btn) btn->setChecked(true);
-    else m_radioAllUpdate->setChecked(true);
+    const int isDel = ReadIntField(m_partitionObject, {QStringLiteral("IsDel"), QStringLiteral("isDel")}, 0);
+    m_scheduledDeleteCheck->setChecked(isDel != 0);
+    const QString delDate = ReadField(m_partitionObject, {QStringLiteral("DelDate"), QStringLiteral("delDate")});
+    if (!delDate.isEmpty()) {
+        QDateTime dt = QDateTime::fromString(delDate, Qt::ISODateWithMs);
+        if (!dt.isValid())
+            dt = QDateTime::fromString(delDate, QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+        if (!dt.isValid())
+            dt = QDateTime::fromString(delDate, QStringLiteral("yyyy-MM-ddTHH:mm:ss"));
+        if (dt.isValid())
+            m_deleteDateTimeEdit->setDateTime(dt);
+    }
 
-    // 元宝蛋
-    m_ybEggCheck->setChecked(m_partitionObject.value(QStringLiteral("YbEgg")).toBool()
-                             || m_partitionObject.value(QStringLiteral("ybEgg")).toBool());
+    int cmdType = ReadIntField(m_partitionObject, {QStringLiteral("PartitionCmdType"), QStringLiteral("partitionCmdType")}, 2);
+    if (auto *btn = m_cmdTypeGroup->button(cmdType))
+        btn->setChecked(true);
+    else
+        m_radioAllUpdate->setChecked(true);
 
-    // 分组（兼容对象数组 [{"Id":1,...}] 或纯数字数组 [1,2,3] 两种格式）
+    // 分组：接口为 List<PartitionGroup>，JSON 多为 groups + groupId（业务分组 Id）；勿用关联表 Id 优先匹配
     QSet<QString> selectedGroupIds;
-    const QJsonValue groupsVal = m_partitionObject.value(QStringLiteral("Groups"));
+    const QJsonValue groupsVal = ExtractGroupsArrayValue(m_partitionObject);
     if (groupsVal.isArray()) {
         const QJsonArray groupsArr = groupsVal.toArray();
         for (int j = 0; j < groupsArr.size(); ++j) {
             if (groupsArr.at(j).isObject()) {
                 const QJsonObject sg = groupsArr.at(j).toObject();
-                const QString gid = ReadField(sg, {"GroupId", "groupId", "Id", "id"});
-                if (!gid.isEmpty())
-                    selectedGroupIds.insert(gid);
+                const QString businessGid = ReadField(sg, {QStringLiteral("GroupId"), QStringLiteral("groupId")});
+                if (!businessGid.isEmpty()) {
+                    InsertNormalizedGroupId(&selectedGroupIds, businessGid);
+                } else {
+                    const QString fallbackId = ReadField(sg, {QStringLiteral("Id"), QStringLiteral("id")});
+                    if (!fallbackId.isEmpty()) {
+                        InsertNormalizedGroupId(&selectedGroupIds, fallbackId);
+                    }
+                }
             } else {
-                // 纯数字 ID
-                selectedGroupIds.insert(groupsArr.at(j).toVariant().toString());
+                InsertNormalizedGroupId(&selectedGroupIds, groupsArr.at(j).toVariant().toString());
             }
         }
     }
 
     for (int i = 0; i < m_groupTable->rowCount(); ++i) {
-        const QString rowId = m_groupTable->item(i, 0)->text();
-        if (selectedGroupIds.contains(rowId))
-            m_groupTable->item(i, 0)->setCheckState(Qt::Checked);
+        QTableWidgetItem *const idItem = m_groupTable->item(i, 0);
+        if (!idItem) {
+            continue;
+        }
+        const QString rowId = idItem->text();
+        if (GroupIdSetContainsRowId(selectedGroupIds, rowId)) {
+            idItem->setCheckState(Qt::Checked);
+        }
     }
 }
 
@@ -606,15 +916,41 @@ void PartitionDialog::OnConfirm()
         m_nameEdit->setFocus();
         return;
     }
-    if (m_pathEdit->text().trimmed().isEmpty()) {
+    if (m_changeNameInTimeCheck->isChecked() && m_changeNameEdit->text().trimmed().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("已勾选「在指定时间更改分区名称」时，更改名称不能为空"));
+        m_changeNameEdit->setFocus();
+        return;
+    }
+
+    const int t = m_partitionType;
+    if (t != 4 && t != 5 && m_pathEdit->text().trimmed().isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("安装路径不能为空"));
         m_pathEdit->setFocus();
         return;
     }
 
+    if (m_templateCombo->count() <= 0) {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("未获取到分区模板，请确认网络与接口后重试"));
+        return;
+    }
+    {
+        const QVariant v = m_templateCombo->itemData(m_templateCombo->currentIndex(), Qt::UserRole);
+        bool ok = false;
+        v.toInt(&ok);
+        if (!ok) {
+            const QString s = v.toString().trimmed();
+            s.toInt(&ok);
+        }
+        if (!ok) {
+            QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请选择一个有效的分区模板"));
+            m_templateCombo->setFocus();
+            return;
+        }
+    }
+
     bool hasGroup = false;
     for (int i = 0; i < m_groupTable->rowCount(); ++i) {
-        if (m_groupTable->item(i, 0)->checkState() == Qt::Checked) {
+        if (auto *it = m_groupTable->item(i, 0); it && it->checkState() == Qt::Checked) {
             hasGroup = true;
             break;
         }
@@ -633,63 +969,96 @@ QJsonObject PartitionDialog::GetRequestBody() const
 
     if (IsEditMode()) {
         bool ok = false;
-        int id = m_partitionId.toInt(&ok);
-        if (ok) body.insert(QStringLiteral("Id"), id);
+        const int id = m_partitionId.toInt(&ok);
+        if (ok)
+            body.insert(QStringLiteral("Id"), id);
     }
 
+    body.insert(QStringLiteral("Type"), m_partitionType);
     body.insert(QStringLiteral("Name"), m_nameEdit->text().trimmed());
-    body.insert(QStringLiteral("ScriptPath"), m_pathEdit->text().trimmed());
+
+    QString scriptPath = m_pathEdit->text().trimmed();
+    if (m_partitionType == 4 || m_partitionType == 5)
+        scriptPath = QString();
+    body.insert(QStringLiteral("ScriptPath"), scriptPath);
 
     const int templateIndex = m_templateCombo->currentIndex();
     if (templateIndex >= 0) {
+        const QVariant v = m_templateCombo->itemData(templateIndex, Qt::UserRole);
         bool ok = false;
-        int tId = m_templateCombo->itemData(templateIndex, Qt::UserRole).toInt(&ok);
-        if (ok) body.insert(QStringLiteral("TemplateId"), tId);
+        int tId = v.toInt(&ok);
+        if (!ok)
+            tId = v.toString().toInt(&ok);
+        if (ok)
+            body.insert(QStringLiteral("TemplateId"), tId);
     }
 
-    body.insert(QStringLiteral("UseDate"), m_dateTimeEdit->dateTime().toString(Qt::ISODate));
+    const QString useDateStr = m_dateTimeEdit->dateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    body.insert(QStringLiteral("UseDate"), useDateStr);
 
-    // 服务器 IP 和端口
-    const QString serverIp = m_serverIpEdit->text().trimmed();
-    if (!serverIp.isEmpty())
-        body.insert(QStringLiteral("ServerIp"), serverIp);
-    const QString serverPort = m_serverPortEdit->text().trimmed();
-    if (!serverPort.isEmpty()) {
-        bool ok = false;
-        int port = serverPort.toInt(&ok);
-        if (ok && port > 0 && port <= 65535)
-            body.insert(QStringLiteral("ServerPort"), port);
+    body.insert(QStringLiteral("IsChangeInTime"), m_changeNameInTimeCheck->isChecked());
+    if (m_changeNameInTimeCheck->isChecked()) {
+        body.insert(QStringLiteral("UseName"), m_changeNameEdit->text().trimmed());
+        body.insert(QStringLiteral("ChangeDate"),
+                    m_changeDateTimeEdit->dateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")));
     }
 
-    int cmdType = m_cmdTypeGroup->checkedId();
-    if (cmdType < 0) cmdType = 2;
-    body.insert(QStringLiteral("PartitionCmdType"), cmdType);
-    body.insert(QStringLiteral("YbEgg"), m_ybEggCheck->isChecked());
+    int scanId = m_scanButtonGroup->checkedId();
+    if (scanId < 0)
+        scanId = 2;
+    body.insert(QStringLiteral("Scan"), scanId);
 
-    QJsonArray groupsArray;
-    for (int i = 0; i < m_groupTable->rowCount(); ++i) {
-        if (m_groupTable->item(i, 0)->checkState() == Qt::Checked) {
-            QJsonObject g;
-            bool ok = false;
-            int gId = m_groupTable->item(i, 0)->text().toInt(&ok);
-            if (ok) {
-                g.insert(QStringLiteral("Id"), gId);
-                g.insert(QStringLiteral("GroupId"), gId);
-            }
-            groupsArray.append(g);
-        }
-    }
-    body.insert(QStringLiteral("Groups"), groupsArray);
-
+    // 设备实例标识由网关对外 IP（可空则用本机首选 IPv4）、HTTP 端口与商户 Uuid 派生，无需用户填写
     {
         MachineCode machineCode;
         body.insert(QStringLiteral("MachineCode"), machineCode.GetRNum().trimmed());
-        body.insert(QStringLiteral("Type"), 1);
+    }
+
+    body.insert(QStringLiteral("IsDel"), m_scheduledDeleteCheck->isChecked() ? 1 : 0);
+    body.insert(QStringLiteral("DelDate"),
+                m_deleteDateTimeEdit->dateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")));
+
+    int cmdType = m_cmdTypeGroup->checkedId();
+    if (cmdType < 0)
+        cmdType = 2;
+    body.insert(QStringLiteral("PartitionCmdType"), cmdType);
+    body.insert(QStringLiteral("YbEgg"), m_ybEggOnRadio->isChecked());
+
+    QJsonArray groupsArray;
+    for (int i = 0; i < m_groupTable->rowCount(); ++i) {
+        QTableWidgetItem *idCell = m_groupTable->item(i, 0);
+        if (!idCell || idCell->checkState() != Qt::Checked)
+            continue;
+        QJsonObject g;
+        bool ok = false;
+        const int gId = idCell->text().toInt(&ok);
+        if (ok) {
+            g.insert(QStringLiteral("Id"), gId);
+            g.insert(QStringLiteral("GroupId"), gId);
+        }
+        groupsArray.append(g);
+    }
+    body.insert(QStringLiteral("Groups"), groupsArray);
+
+    if (IsEditMode()) {
+        if (m_partitionType == 4) {
+            if (m_partitionObject.contains(QStringLiteral("DbInfo")))
+                body.insert(QStringLiteral("DbInfo"), m_partitionObject.value(QStringLiteral("DbInfo")));
+            else if (m_partitionObject.contains(QStringLiteral("dbInfo")))
+                body.insert(QStringLiteral("DbInfo"), m_partitionObject.value(QStringLiteral("dbInfo")));
+        } else if (m_partitionType == 5) {
+            static const QStringList kWebKeys = {QStringLiteral("WebUrl"),      QStringLiteral("webUrl"),
+                                                 QStringLiteral("SuccessMark"), QStringLiteral("successMark"),
+                                                 QStringLiteral("DataFormat"),  QStringLiteral("dataFormat")};
+            for (const QString &k : kWebKeys) {
+                if (m_partitionObject.contains(k))
+                    body.insert(k, m_partitionObject.value(k));
+            }
+        }
     }
 
     if (!IsEditMode()) {
         body.insert(QStringLiteral("IsCreate"), true);
-        body.insert(QStringLiteral("IsChangeInTime"), false);
     }
 
     return body;

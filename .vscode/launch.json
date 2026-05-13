@@ -5,7 +5,7 @@
             "name": "Debug cs",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/out/build/debug/Debug/cs.exe",
+            "program": "${workspaceFolder}/out/build/debug/Debug/支付网关.exe",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/out/build/debug/Debug",
@@ -14,6 +14,27 @@
             ],
             "preLaunchTask": "cmake-build",
             "console": "internalConsole"
+        },
+        {
+            "name": "Gateway: 运行静态 Release 支付网关.exe（不重建）",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/build_static_release/支付网关.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/out/build_static_release",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Gateway: 指南一键 — 静态重建并运行 支付网关.exe",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "preLaunchTask": "gateway-rebuild-static-release",
+            "program": "${workspaceFolder}/out/build_static_release/支付网关.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/out/build_static_release",
+            "console": "integratedTerminal"
         }
     ]
 }

@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/checkbox">
+    <file alias="checkbox_unchecked.svg">ui/checkbox_unchecked.svg</file>
+    <file alias="checkbox_checked.svg">ui/checkbox_checked.svg</file>
+  </qresource>
+</RCC>

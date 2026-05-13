@@ -44,10 +44,17 @@
     </layout>
    </item>
    <item>
-    <widget class="QTableWidget" name="logTable"/>
+    <widget class="LogTableWidget" name="logTable"/>
    </item>
   </layout>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>LogTableWidget</class>
+   <extends>QTableWidget</extends>
+   <header>logpage.h</header>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

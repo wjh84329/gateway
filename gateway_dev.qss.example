@@ -1,0 +1,16 @@
+/* 复制为与「支付网关.exe」同目录下的 gateway_dev.qss，保存后约 0.25s 内自动套用到主窗口（无需重编）。
+   也可设置环境变量 GATEWAY_LIVE_QSS=1 启用监视（便于先起程序再建文件）。
+   后写规则覆盖内置样式表中相同选择器。 */
+
+/* 示例：导航文字
+QLabel#gatewayNavText {
+  font-size: 14px;
+  color: #ffffff;
+}
+*/
+
+/* 示例：顶栏底色
+#navBarFrame {
+  background: #7a3d46;
+}
+*/

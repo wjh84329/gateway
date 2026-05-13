@@ -12,13 +12,22 @@
     <layout class="QHBoxLayout" name="actionLayout">
      <property name="spacing"><number>14</number></property>
      <item><widget class="QPushButton" name="addGroupButton"><property name="text"><string>添加分组</string></property></widget></item>
+     <item><widget class="QPushButton" name="editGroupButton"><property name="text"><string>编辑分组</string></property></widget></item>
+     <item><widget class="QPushButton" name="deleteGroupButton"><property name="text"><string>删除分组</string></property></widget></item>
      <item><widget class="QPushButton" name="refreshGroupButton"><property name="text"><string>刷新分组</string></property></widget></item>
      <item><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
     </layout>
    </item>
-   <item><widget class="QTableWidget" name="groupTable"/></item>
+   <item><widget class="GroupManageTableWidget" name="groupTable"/></item>
   </layout>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>GroupManageTableWidget</class>
+   <extends>QTableWidget</extends>
+   <header>groupmanagepage.h</header>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

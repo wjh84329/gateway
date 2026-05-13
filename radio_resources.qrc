@@ -1,0 +1,6 @@
+<RCC>
+  <qresource prefix="/radio">
+    <file alias="radio_unchecked.svg">ui/radio_unchecked.svg</file>
+    <file alias="radio_checked.svg">ui/radio_checked.svg</file>
+  </qresource>
+</RCC>

@@ -20,8 +20,8 @@
       <item>
        <layout class="QHBoxLayout" name="scriptTopLayout">
         <property name="spacing"><number>6</number></property>
-        <item><widget class="QLabel" name="engineLabel"><property name="text"><string>选择引擎:</string></property></widget></item>
-        <item><widget class="QComboBox" name="engineComboBox"/></item>
+        <item><widget class="QLabel" name="partitionLabel"><property name="text"><string>选择分区:</string></property></widget></item>
+        <item><widget class="QComboBox" name="partitionComboBox"><property name="minimumSize"><size><width>280</width><height>0</height></size></property></widget></item>
         <item><spacer name="horizontalSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
        </layout>
       </item>

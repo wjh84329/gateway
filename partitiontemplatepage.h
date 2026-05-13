@@ -1,6 +1,7 @@
 #ifndef PARTITIONTEMPLATEPAGE_H
 #define PARTITIONTEMPLATEPAGE_H
 
+#include <QJsonArray>
 #include <QWidget>
 
 QT_BEGIN_NAMESPACE
@@ -17,10 +18,22 @@ public:
     explicit PartitionTemplatePage(QWidget *parent = nullptr);
     ~PartitionTemplatePage() override;
 
+signals:
+    void statusMessageRequested(const QString &message, int timeout);
+
+private slots:
+    void OnAddTemplate();
+    void OnEditTemplate();
+    void OnDeleteTemplate();
+    void OnTemplateContextMenu(const QPoint &pos);
+
 private:
     void LoadTemplates();
+    void UpdateTemplateActionButtons();
+    int SelectedTemplateId() const;
 
     Ui::PartitionTemplatePage *ui;
+    QJsonArray m_templatesCache;
 };
 
 #endif // PARTITIONTEMPLATEPAGE_H

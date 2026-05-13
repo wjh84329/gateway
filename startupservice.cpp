@@ -3,247 +3,225 @@
 #include "appconfig.h"
 #include "applogger.h"
 #include "filemonitorservice.h"
+#include "gatewayhttpserver.h"
 #include "gatewayapiclient.h"
+#include "partitionpathcache.h"
 #include "rabbitmqdispatcher.h"
 #include "rabbitmqservice.h"
+#include "startupsplash.h"
 
-#include <QDialog>
-#include <QHBoxLayout>
-#include <QLabel>
-#include <QLineEdit>
+#include <QJsonArray>
 #include <QMessageBox>
-#include <QPushButton>
-#include <QVBoxLayout>
 
 namespace {
-QString ReadStringField(const QJsonObject &object, const QStringList &names)
+
+void SplashStep(StartupSplash *splash, const QString &message)
 {
-    for (const auto &name : names) {
-        const QString value = object.value(name).toVariant().toString().trimmed();
-        if (!value.isEmpty()) {
-            return value;
-        }
-    }
-    return {};
-}
-
-bool ReadBoolField(const QJsonObject &object, const QStringList &names, bool *hasValue = nullptr)
-{
-    if (hasValue) {
-        *hasValue = false;
-    }
-
-    for (const auto &name : names) {
-        if (!object.contains(name)) {
-            continue;
-        }
-
-        if (hasValue) {
-            *hasValue = true;
-        }
-
-        const QJsonValue value = object.value(name);
-        if (value.isBool()) {
-            return value.toBool();
-        }
-
-        const QString text = value.toVariant().toString().trimmed();
-        if (text.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0 || text == QStringLiteral("1")) {
-            return true;
-        }
-        if (text.compare(QStringLiteral("false"), Qt::CaseInsensitive) == 0 || text == QStringLiteral("0")) {
-            return false;
-        }
-    }
-
-    return false;
-}
-
-QString ExtractGatewayId(const QJsonObject &equipObject)
-{
-    return ReadStringField(equipObject,
-                           {
-                               QStringLiteral("GatewayId"),
-                               QStringLiteral("gatewayId"),
-                               QStringLiteral("GatewayName"),
-                               QStringLiteral("gatewayName"),
-                               QStringLiteral("EquipName"),
-                               QStringLiteral("equipName"),
-                               QStringLiteral("Name"),
-                               QStringLiteral("name")
-                           });
-}
-
-bool IsEquipBound(const QJsonObject &equipObject)
-{
-    bool hasBoundFlag = false;
-    const bool boundFlag = ReadBoolField(equipObject,
-                                         {
-                                             QStringLiteral("IsBind"),
-                                             QStringLiteral("isBind"),
-                                             QStringLiteral("HasBind"),
-                                             QStringLiteral("hasBind"),
-                                             QStringLiteral("Bind"),
-                                             QStringLiteral("bind")
-                                         },
-                                         &hasBoundFlag);
-    if (hasBoundFlag) {
-        return boundFlag;
-    }
-
-    return !ExtractGatewayId(equipObject).isEmpty();
-}
-
-QString PromptGatewayId(const QString &initialValue)
-{
-    QDialog dialog;
-    dialog.setWindowTitle(QStringLiteral("设置网关标识"));
-    dialog.setFixedSize(340, 170);
-
-    auto *layout = new QVBoxLayout(&dialog);
-    layout->setContentsMargins(32, 26, 32, 24);
-    layout->setSpacing(20);
-
-    auto *label = new QLabel(QStringLiteral("网关标识:"), &dialog);
-    auto *edit = new QLineEdit(&dialog);
-    auto *button = new QPushButton(QStringLiteral("确认"), &dialog);
-
-    edit->setText(initialValue.trimmed());
-    edit->setFixedHeight(32);
-    button->setFixedSize(102, 36);
-
-    auto *buttonLayout = new QHBoxLayout();
-    buttonLayout->addStretch();
-    buttonLayout->addWidget(button);
-    buttonLayout->addStretch();
-
-    layout->addWidget(label);
-    layout->addWidget(edit);
-    layout->addSpacing(4);
-    layout->addLayout(buttonLayout);
-
-    QObject::connect(button, &QPushButton::clicked, &dialog, [&dialog, edit] {
-        if (edit->text().trimmed().isEmpty()) {
-            QMessageBox::warning(&dialog, QStringLiteral("提示"), QStringLiteral("请输入网关标识"));
-            edit->setFocus();
-            return;
-        }
-        dialog.accept();
-    });
-
-    if (dialog.exec() != QDialog::Accepted) {
-        return {};
-    }
-
-    return edit->text().trimmed();
-}
-
-bool EnsureGatewayBinding(AppConfigValues *config)
-{
-    AppLogger::WriteLog(QStringLiteral("检测网关设备绑定状态..."));
-
-    GatewayApiClient client;
-    QString errorMessage;
-    const QJsonObject equipObject = client.GetEquip(&errorMessage);
-    if (equipObject.isEmpty() && !errorMessage.isEmpty()) {
-        AppLogger::WriteLog(QStringLiteral("获取网关设备信息失败：%1").arg(errorMessage));
-        QMessageBox::critical(nullptr, QStringLiteral("启动失败"), QStringLiteral("获取网关设备信息失败：%1").arg(errorMessage));
-        return false;
-    }
-
-    if (IsEquipBound(equipObject)) {
-        const QString boundGatewayId = ExtractGatewayId(equipObject);
-        if (config && !boundGatewayId.isEmpty() && config->gatewayId.trimmed() != boundGatewayId) {
-            config->gatewayId = boundGatewayId;
-            AppConfig::Save(*config);
-        }
-        AppLogger::WriteLog(QStringLiteral("当前设备已绑定网关标识：%1")
-                                .arg(boundGatewayId.isEmpty() ? QStringLiteral("<unknown>") : boundGatewayId));
-        return true;
-    }
-
-    AppLogger::WriteLog(QStringLiteral("当前设备尚未绑定网关标识，等待设置"));
-    while (true) {
-        const QString gatewayId = PromptGatewayId(config ? config->gatewayId : QString());
-        if (gatewayId.isEmpty()) {
-            AppLogger::WriteLog(QStringLiteral("用户取消设置网关标识，启动终止"));
-            return false;
-        }
-
-        if (!client.AddEquipName(gatewayId, &errorMessage)) {
-            AppLogger::WriteLog(QStringLiteral("设置网关标识失败：%1").arg(errorMessage));
-            QMessageBox::warning(nullptr, QStringLiteral("设置失败"), QStringLiteral("设置网关标识失败：%1").arg(errorMessage));
-            continue;
-        }
-
-        if (config) {
-            config->gatewayId = gatewayId;
-            AppConfig::Save(*config);
-        }
-
-        AppLogger::WriteLog(QStringLiteral("网关标识设置成功：%1").arg(gatewayId));
-        return true;
-    }
-}
-
-void LogGatewayValidation(const AppConfigValues &config)
-{
-    AppLogger::WriteLog(QStringLiteral("网关标识校验中..."));
-    if (config.gatewayId.trimmed().isEmpty()) {
-        AppLogger::WriteLog(QStringLiteral("网关标识校验失败：未配置网关标识"));
+    if (!splash) {
         return;
     }
+    splash->setStatusText(message);
+    splash->pumpEvents();
+}
 
-    AppLogger::WriteLog(QStringLiteral("网关标识校验成功：%1").arg(config.gatewayId));
+void HideSplashForDialog(StartupSplash *splash)
+{
+    if (splash) {
+        splash->hide();
+    }
+}
+bool EnsureGatewayEndpointRegistered(AppConfigValues *config, StartupSplash *splash)
+{
+    if (!config) {
+        return false;
+    }
+    SplashStep(splash, QStringLiteral("正在登记网关端点…"));
+    QString errorMessage;
+    GatewayApiClient client;
+    if (!client.RegisterGatewayEndpoint(*config, &errorMessage)) {
+        if (GatewayApiClient::IsGatewayEndpointOccupiedError(errorMessage)) {
+            AppLogger::WriteLog(QStringLiteral("网关端点登记跳过：当前「网关对外 IP + 通讯端口」已被本商户下其他在线网关占用。%1")
+                                    .arg(errorMessage));
+            return true;
+        }
+        AppLogger::WriteLog(QStringLiteral("网关端点登记失败：%1").arg(errorMessage));
+        HideSplashForDialog(splash);
+        QMessageBox::critical(nullptr,
+                              QStringLiteral("启动失败"),
+                              QStringLiteral("网关启动失败，请联系客服处理。\n"
+                                             "（可将程序所在目录下 log 文件夹中「当天日期.log」提供给客服，便于排查网络与配置。）"));
+        return false;
+    }
+    return true;
+}
+
+void LogGatewayListenConfig(const AppConfigValues &config)
+{
+    Q_UNUSED(config);
 }
 
 bool LogServiceConnection(const AppConfigValues &config)
 {
-    AppLogger::WriteLog(QStringLiteral("网关服务器连接中..."));
     QString errorMessage;
     RabbitMqService::SetMessageHandler(RabbitMqDispatcher::HandleMessage);
     if (!RabbitMqService::StartListening(config, &errorMessage)) {
-        AppLogger::WriteLog(QStringLiteral("网关服务器连接失败：%1").arg(errorMessage));
+        AppLogger::WriteLog(QStringLiteral("RabbitMQ 连接失败：%1").arg(errorMessage));
         return false;
     }
 
-    AppLogger::WriteLog(QStringLiteral("网关服务器连接成功"));
-    AppLogger::WriteLog(QStringLiteral("RabbitMQ 消息监听已启动，队列：%1").arg(RabbitMqService::ConsumerQueueName(config)));
     return true;
 }
 
 void LogLocalDataLoading(const AppConfigValues &config)
 {
-    AppLogger::WriteLog(QStringLiteral("加载数据到本机中..."));
-    if (config.restUrl.trimmed().isEmpty()) {
-        AppLogger::WriteLog(QStringLiteral("加载数据到本机中完成"));
-        return;
+    Q_UNUSED(config);
+}
+} // namespace
+
+static bool g_httpListenSkippedInUse = false;
+
+bool StartupService::TryParseHttpListenPort(const QString &text, quint16 *out, QString *errorMessage)
+{
+    if (!out) {
+        return false;
+    }
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty()) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("未配置通讯端口");
+        }
+        return false;
+    }
+    bool ok = false;
+    const int n = trimmed.toInt(&ok);
+    if (!ok || n < 1 || n > 65535) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("通讯端口无效（须为 1-65535 的整数）");
+        }
+        return false;
+    }
+    *out = static_cast<quint16>(n);
+    return true;
+}
+
+bool StartupService::HttpListenSkippedDueToAddressInUse()
+{
+    return g_httpListenSkippedInUse;
+}
+
+void StartupService::ApplySavedAppConfigReload()
+{
+    const AppConfigValues config = AppConfig::Load();
+
+    quint16 httpListenPort = 0;
+    QString portError;
+    if (!TryParseHttpListenPort(config.port, &httpListenPort, &portError)) {
+        AppLogger::WriteLog(QStringLiteral("保存后重载：通讯端口无效，已跳过 HTTP 监听重启：%1").arg(portError));
+    } else {
+        g_httpListenSkippedInUse = false;
+        QString httpListenError;
+        auto &httpServer = GatewayHttpServer::instance();
+        if (!httpServer.start(httpListenPort, &httpListenError)) {
+            if (httpServer.listenErrorIsAddressInUse()) {
+                g_httpListenSkippedInUse = true;
+                AppLogger::WriteLog(QStringLiteral(
+                    "保存后重载：通讯端口 %1 已被本机占用，HTTP 未监听；请更换端口或关闭占用进程后再次保存。")
+                                        .arg(httpListenPort));
+            } else {
+                AppLogger::WriteLog(QStringLiteral("保存后重载：网关 HTTP 监听失败：%1").arg(httpListenError));
+            }
+        }
     }
 
-    AppLogger::WriteLog(QStringLiteral("加载数据到本机中完成"));
-}
+    RabbitMqService::SetMessageHandler(RabbitMqDispatcher::HandleMessage);
+    QString mqErr;
+    RabbitMqService::StopListening();
+    if (!RabbitMqService::StartListening(config, &mqErr)) {
+        AppLogger::WriteLog(QStringLiteral("保存后重载：RabbitMQ 连接失败：%1").arg(mqErr));
+    }
+
+    FileMonitorService::Instance().Initialize(config);
+
+    AppLogger::WriteLog(QStringLiteral("系统设置保存成功，运行配置已重载。"));
 }
 
-bool StartupService::RunStartupSequence()
+bool StartupService::RunStartupSequence(StartupSplash *splash)
 {
+    g_httpListenSkippedInUse = false;
     AppConfig::EnsureConfigExists();
     AppConfigValues config = AppConfig::Load();
+    // 自动检测：拉取公网 IP 写入配置（失败则回退本机 IPv4），避免复制部署沿用旧地址
+    if (config.gatewayAdvertisedIpAutoDetect) {
+        SplashStep(splash, QStringLiteral("正在获取公网 IP…"));
+    }
+    AppConfig::RefreshGatewayAdvertisedIpForCurrentMachine(config);
 
     AppLogger::MarkSessionStart();
-    AppLogger::WriteLog(QStringLiteral("程序启动中..."));
+    SplashStep(splash, QStringLiteral("正在读取配置…"));
 
-    if (!EnsureGatewayBinding(&config)) {
+    quint16 httpListenPort = 0;
+    QString portError;
+    if (!TryParseHttpListenPort(config.port, &httpListenPort, &portError)) {
+        AppLogger::WriteLog(QStringLiteral("通讯端口配置无效：%1").arg(portError));
+        HideSplashForDialog(splash);
+        QMessageBox::critical(nullptr, QStringLiteral("启动失败"), portError);
         return false;
     }
 
-    LogGatewayValidation(config);
+    SplashStep(splash, QStringLiteral("正在同步商户信息…"));
+    {
+        QString merchantSyncErr;
+        if (!GatewayApiClient().SyncClientMerchantIdentity(config, &merchantSyncErr)) {
+            if (!merchantSyncErr.trimmed().isEmpty()) {
+                AppLogger::WriteLog(QStringLiteral("启动时同步商户信息失败（昵称/Uuid 将沿用本地配置）：%1").arg(merchantSyncErr));
+            }
+        }
+    }
+
+    if (!EnsureGatewayEndpointRegistered(&config, splash)) {
+        return false;
+    }
+
+    SplashStep(splash, QStringLiteral("正在同步分区安装路径…"));
+    {
+        GatewayApiClient api;
+        QString partErr;
+        const QJsonArray parts = api.GetPartitions(&partErr);
+        PartitionPathCache::UpdateFromPartitionsArray(parts);
+        if (parts.isEmpty() && !partErr.isEmpty()) {
+            AppLogger::WriteLog(QStringLiteral("启动时拉取分区列表失败（二维码相对路径可能无法按分区盘符解析）：%1").arg(partErr));
+        }
+    }
+
+    SplashStep(splash, QStringLiteral("正在启动通讯端口服务…"));
+    QString httpListenError;
+    auto &httpServer = GatewayHttpServer::instance();
+    if (!httpServer.start(httpListenPort, &httpListenError)) {
+        if (httpServer.listenErrorIsAddressInUse()) {
+            g_httpListenSkippedInUse = true;
+            AppLogger::WriteLog(QStringLiteral(
+                "通讯端口 %1 已被本机其他进程占用（常见于其他目录下的网关使用相同端口），本进程不监听该端口但仍进入主界面。"
+                "请在本目录「系统设置」中更换通讯端口，或关闭占用该端口的程序后保存并重启。")
+                                    .arg(httpListenPort));
+        } else {
+            AppLogger::WriteLog(QStringLiteral("网关通讯端口监听失败：%1").arg(httpListenError));
+            HideSplashForDialog(splash);
+            QMessageBox::critical(nullptr,
+                                  QStringLiteral("启动失败"),
+                                  QStringLiteral("网关通讯端口监听失败：%1").arg(httpListenError));
+            return false;
+        }
+    }
+
+    LogGatewayListenConfig(config);
+    SplashStep(splash, QStringLiteral("正在连接消息服务…"));
     const bool rabbitConnected = LogServiceConnection(config);
     LogLocalDataLoading(config);
+    SplashStep(splash, QStringLiteral("正在初始化文件监控…"));
     FileMonitorService::Instance().Initialize(config);
     if (!rabbitConnected) {
-        AppLogger::WriteLog(QStringLiteral("程序启动完成，但 RabbitMQ AMQP 消费者尚未就绪"));
+        AppLogger::WriteLog(QStringLiteral("RabbitMQ 消费者未就绪，消息功能不可用"));
     }
-    AppLogger::WriteLog(QStringLiteral("服务启动成功，监听端口：%1").arg(config.port));
-    AppLogger::WriteLog(QStringLiteral("程序启动成功"));
+    SplashStep(splash, QStringLiteral("正在加载主界面…"));
     return true;
 }

@@ -1,6 +1,12 @@
 #include "mainwindow.h"
 
+#include "filemonitorservice.h"
+#include "gatewayapiclient.h"
+#include "gatewayhttpserver.h"
+#include "gatewaysingleinstance.h"
+#include "rabbitmqservice.h"
 #include "startupservice.h"
+#include "startupsplash.h"
 
 #include <QApplication>
 #include <QLocale>
@@ -9,10 +15,18 @@
 int main(int argc, char *argv[])
 {
     QApplication a(argc, argv);
+    a.setQuitOnLastWindowClosed(false);
+    a.setWindowIcon(MainWindow::ApplicationIcon());
 
-    if (!StartupService::RunStartupSequence()) {
-        return 0;
-    }
+    QObject::connect(&a, &QCoreApplication::aboutToQuit, [] {
+        QString offlineErr;
+        GatewayApiClient().SetGatewayEndpointOffline(&offlineErr);
+        Q_UNUSED(offlineErr);
+        GatewayHttpServer::instance().stop();
+        FileMonitorService::Instance().Stop();
+        RabbitMqService::StopListening();
+        GatewaySingleInstance::instance().shutdownForAppExit();
+    });
 
     QTranslator translator;
     const QStringList uiLanguages = QLocale::system().uiLanguages();
@@ -23,7 +37,25 @@ int main(int argc, char *argv[])
             break;
         }
     }
+
+    if (!GatewaySingleInstance::instance().tryAcquirePrimaryOrNotifyExisting()) {
+        return 0;
+    }
+
+    StartupSplash splash;
+    splash.show();
+    splash.pumpEvents();
+
+    if (!StartupService::RunStartupSequence(&splash)) {
+        return 0;
+    }
+
     MainWindow w;
-    w.show();
+    GatewaySingleInstance::instance().setMainWindow(&w);
+    splash.fadeOutAndThen([&w]() {
+        w.show();
+        w.raise();
+        w.activateWindow();
+    });
     return QCoreApplication::exec();
 }

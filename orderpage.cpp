@@ -5,6 +5,9 @@
 
 #include <QDate>
 #include <QHeaderView>
+#include <QHideEvent>
+#include <QMessageBox>
+#include <QShowEvent>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTableWidgetItem>
@@ -62,6 +65,28 @@ OrderPage::~OrderPage()
     delete ui;
 }
 
+void OrderPage::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    requestAutoQueryOnShow();
+}
+
+void OrderPage::hideEvent(QHideEvent *event)
+{
+    m_deferredQueryAfterPartitions = false;
+    QWidget::hideEvent(event);
+}
+
+void OrderPage::requestAutoQueryOnShow()
+{
+    if (ui->partitionComboBox->count() == 0) {
+        m_deferredQueryAfterPartitions = true;
+        return;
+    }
+    m_deferredQueryAfterPartitions = false;
+    onSearchClicked();
+}
+
 void OrderPage::loadPartitions()
 {
     QtConcurrent::run([this] {
@@ -84,22 +109,39 @@ void OrderPage::loadPartitions()
                     ui->partitionComboBox->addItem(name, id);
                 }
             }
+            if (m_deferredQueryAfterPartitions && isVisible()) {
+                m_deferredQueryAfterPartitions = false;
+                onSearchClicked();
+            }
         }, Qt::QueuedConnection);
     });
 }
 
 void OrderPage::onSearchClicked()
 {
+    const QDate startD = ui->startDateEdit->date();
+    const QDate endD = ui->endDateEdit->date();
+    if (startD > endD) {
+        QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("开始日期不能晚于结束日期。"));
+        return;
+    }
+
     UiHelpers::SetPageLoading(this, true, QStringLiteral("查询中..."));
     ui->searchOrderButton->setEnabled(false);
 
     QJsonObject query;
-    query[QStringLiteral("StartTime")] = ui->startDateEdit->date().toString(QStringLiteral("yyyy-MM-dd"));
-    query[QStringLiteral("EndTime")]   = ui->endDateEdit->date().toString(QStringLiteral("yyyy-MM-dd"));
+    // 与 TenantServer GetClientOrders 一致：区间为 [StartTime, EndTime]，且要求 StartTime < EndTime。
+    // 仅传日期时两端都会变成当日 00:00:00，同一天查询会相等触发 400「开始时间不能大于等于结束时间」。
+    // 对齐老网关 UserControlOrder：结束日为当日 23:59:59（原 AddSeconds(86399)）。
+    query[QStringLiteral("StartTime")] =
+        QStringLiteral("%1 00:00:00").arg(startD.toString(QStringLiteral("yyyy-MM-dd")));
+    query[QStringLiteral("EndTime")] =
+        QStringLiteral("%1 23:59:59").arg(endD.toString(QStringLiteral("yyyy-MM-dd")));
 
     const QString account = ui->accountEdit->text().trimmed();
     if (!account.isEmpty()) {
-        query[QStringLiteral("Account")] = account;
+        // TenantServer OrderClientQueryModel 字段为 PlayerAccount（与旧网关 HttpClients 一致）
+        query[QStringLiteral("PlayerAccount")] = account;
     }
 
     query[QStringLiteral("ExchangeType")] = ui->exchangeTypeComboBox->currentText();
@@ -108,6 +150,9 @@ void OrderPage::onSearchClicked()
     if (partitionId > 0) {
         query[QStringLiteral("PartitionId")] = partitionId;
     }
+
+    query[QStringLiteral("PageNumber")] = 1;
+    query[QStringLiteral("PageCount")] = 500;
 
     QtConcurrent::run([this, query] {
         QString error;
@@ -155,11 +200,31 @@ void OrderPage::populateTable(const QJsonArray &orders)
             ui->orderTable->setItem(row, col, item);
         };
 
-        cell(0, obj.value(QStringLiteral("partitionName")).toString());
-        cell(1, obj.value(QStringLiteral("playerAccount")).toString());
-        cell(2, QString::number(obj.value(QStringLiteral("amount")).toDouble()));
-        cell(3, obj.value(QStringLiteral("rechargeMethod")).toString());
-        cell(4, QString::number(obj.value(QStringLiteral("giveAmount")).toDouble()));
+        auto str = [](const QJsonObject &o, const QStringList &keys) -> QString {
+            for (const QString &k : keys) {
+                const QJsonValue v = o.value(k);
+                if (v.isString() && !v.toString().isEmpty()) {
+                    return v.toString();
+                }
+                if (v.isDouble()) {
+                    return QString::number(v.toDouble());
+                }
+            }
+            return {};
+        };
+        cell(0, str(obj, {QStringLiteral("partitionName"), QStringLiteral("PartitionName")}));
+        cell(1, str(obj, {QStringLiteral("playerAccount"), QStringLiteral("PlayerAccount")}));
+        {
+            const QJsonValue amountV = obj.contains(QStringLiteral("amount")) ? obj.value(QStringLiteral("amount"))
+                                                                            : obj.value(QStringLiteral("Amount"));
+            cell(2, QString::number(amountV.toDouble()));
+        }
+        cell(3, str(obj, {QStringLiteral("rechargeMethod"), QStringLiteral("RechargeMethod")}));
+        {
+            const QJsonValue giveV = obj.contains(QStringLiteral("giveAmount")) ? obj.value(QStringLiteral("giveAmount"))
+                                                                               : obj.value(QStringLiteral("GiveAmount"));
+            cell(4, QString::number(giveV.toDouble()));
+        }
     }
 
     ui->orderCountLabel->setText(QStringLiteral("共 %1 条记录").arg(orders.size()));

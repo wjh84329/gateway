@@ -214,6 +214,7 @@ bool SaveTxtFile(const QString &filePath, const QString &content, QString *error
         return false;
     }
 
+    // 充值 / 补发：只追加一行，不读回、不覆盖、不按账号去重（与老网关 StreamWriter(..., append:true) 一致）
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
         if (errorMessage) {
@@ -225,7 +226,6 @@ bool SaveTxtFile(const QString &filePath, const QString &content, QString *error
     file.write(content.toLocal8Bit());
     file.write("\n");
     file.close();
-    AppLogger::WriteLog(QStringLiteral("[SaveTxtFile] 写入成功 filePath=%1, content=%2").arg(filePath, content));
     return true;
 }
 
@@ -259,8 +259,6 @@ bool RechargeToFile(const QString &path, double score, const QString &account, Q
 
     amount = qRound(amount * 10.0) / 10.0;
     if (amount > 0.0) {
-        AppLogger::WriteLog(QStringLiteral("[RechargeToFile] path=%1, score=%2, account=%3")
-                                .arg(path, FormatAmount(score), account));
         return WriteDecimalScore(path, amount, account, errorMessage);
     }
     return true;
@@ -444,12 +442,22 @@ bool RedPackageGive(const QJsonObject &rechargeObject,
     return true;
 }
 
-QString ResolveTongQuScriptPath(const QString &scriptPath, const QString &tongQuDir)
+/// 通区根路径：与 installscriptprocessor::ResolveTongQuScriptRoot 一致。
+/// - IsDir != 0：TongQuDir 为完整服根目录（其下再接 Mir200/Envir/...）
+/// - 否则：TongQuDir 为相对分区上一级目录的文件夹名
+QString ResolveTongQuScriptPath(const QString &scriptPath, const QString &tongQuDir, int isDir)
 {
+    const QString dir = tongQuDir.trimmed();
+    if (dir.isEmpty()) {
+        return scriptPath;
+    }
+    if (isDir != 0) {
+        return dir;
+    }
     const QFileInfo info(scriptPath);
     QDir parentDir = info.dir();
     parentDir.cdUp();
-    return QDir(parentDir.absolutePath()).filePath(tongQuDir);
+    return QDir(parentDir.absolutePath()).filePath(dir);
 }
 
 bool ProcessLegendRecharge(const QJsonObject &rechargeObject, const QJsonObject &templateObject, QString *errorMessage)
@@ -501,9 +509,18 @@ bool ProcessLegendRecharge(const QJsonObject &rechargeObject, const QJsonObject 
         return true;
     };
 
-    if (ReadBoolField(rechargeObject, {QStringLiteral("IsTongQu"), QStringLiteral("isTongQu")})) {
+    const bool isTongQu = ReadBoolField(rechargeObject, {QStringLiteral("IsTongQu"), QStringLiteral("isTongQu")})
+                          || ReadBoolField(templateObject, {QStringLiteral("IsTongQu"), QStringLiteral("isTongQu")});
+    if (isTongQu) {
         const QString tongQuDir = ReadStringField(templateObject, {QStringLiteral("TongQuDir"), QStringLiteral("tongQuDir")});
-        if (!processPath(ResolveTongQuScriptPath(scriptPath, tongQuDir))) {
+        const int isDir = ReadIntField(templateObject, {QStringLiteral("IsDir"), QStringLiteral("isDir")}, 0);
+        const QString tongRoot = ResolveTongQuScriptPath(scriptPath, tongQuDir, isDir);
+        if (tongQuDir.trimmed().isEmpty()) {
+            AppLogger::WriteLog(
+                QStringLiteral("通区充值：模板 TongQuDir 为空，已按分区 ScriptPath 落盘（订单号 %1）")
+                    .arg(ReadStringField(rechargeObject, {QStringLiteral("OrderNumber"), QStringLiteral("orderNumber")})));
+        }
+        if (!processPath(tongRoot)) {
             return false;
         }
     } else {
@@ -562,6 +579,10 @@ bool ProcessQjRecharge(const QJsonObject &rechargeObject, QString *errorMessage)
 
 void WriteRechargeSummaryLog(const QJsonObject &rechargeObject, const QString &operation)
 {
+    const QJsonObject templateObject = ReadObjectField(rechargeObject, {QStringLiteral("template"), QStringLiteral("Template")});
+    const TemplateType templateType = ResolveTemplateType(rechargeObject, templateObject);
+    const double safetyMoney = ReadDoubleField(templateObject, {QStringLiteral("SafetyMoney"), QStringLiteral("safetyMoney")});
+
     const QString partitionName = ReadStringField(rechargeObject, {QStringLiteral("PartitionName"), QStringLiteral("partitionName")});
     const QString orderNumber = ReadStringField(rechargeObject, {QStringLiteral("OrderNumber"), QStringLiteral("orderNumber")});
     const QString playerAccount = ReadStringField(rechargeObject, {QStringLiteral("PlayerAccount"), QStringLiteral("playerAccount")});
@@ -575,32 +596,24 @@ void WriteRechargeSummaryLog(const QJsonObject &rechargeObject, const QString &o
     const double totalAmount = incentiveGiveAmount + amount + channelGiveAmount + redPacketAmount + extraGiveAmount;
     const double ratio = ReadDoubleField(rechargeObject, {QStringLiteral("Ratio"), QStringLiteral("ratio")}, 1.0);
 
-    AppLogger::WriteLog(QStringLiteral("%1=>【%2】%3 账号%4 充值%5元 送%6元 获得%7%8")
+    QString safetyPart;
+    double yuanbaoBaseAmount = totalAmount;
+    if (safetyMoney > 0.0
+        && (templateType == TemplateType::CS || templateType == TemplateType::CQ || templateType == TemplateType::CQ3)) {
+        safetyPart = QStringLiteral(" 风控金赠送%1元").arg(FormatAmount(safetyMoney));
+        yuanbaoBaseAmount += safetyMoney;
+    }
+
+    AppLogger::WriteLog(QStringLiteral("%1=>【%2】%3 账号%4 充值%5元 送%6元%7 获得%8%9")
                             .arg(operation,
                                  partitionName,
                                  orderNumber,
                                  playerAccount,
                                  FormatAmount(amount),
                                  QString::number(zstotalAmount, 'f', 1),
-                                 FormatInteger(totalAmount * ratio),
+                                 safetyPart,
+                                 FormatInteger(yuanbaoBaseAmount * ratio),
                                  currencyName));
-
-    QStringList details;
-    if (channelGiveAmount > 0.01) {
-        details << QStringLiteral("渠道赠送得%1元").arg(FormatAmount(channelGiveAmount));
-    }
-    if (incentiveGiveAmount > 0.01) {
-        details << QStringLiteral("激励赠送得%1元").arg(FormatAmount(incentiveGiveAmount));
-    }
-    if (redPacketAmount > 0.01) {
-        details << QStringLiteral("红包赠送得%1元").arg(FormatAmount(redPacketAmount));
-    }
-    if (extraGiveAmount > 0.01) {
-        details << QStringLiteral("额外赠送得%1元").arg(FormatAmount(extraGiveAmount));
-    }
-    if (!details.isEmpty()) {
-        AppLogger::WriteLog(details.join(QLatin1Char(' ')));
-    }
 }
 }
 

@@ -38,37 +38,54 @@ public:
 private slots:
     void OnBrowsePath();
     void OnConfirm();
+    void OnTemplateIndexChanged(int index);
 
 private:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void SetupUi();
     void PopulateFields();
+    void SyncPartitionKindUi();
+    int TemplateTypeForComboIndex(int index) const;
 
     // 原始数据
     QJsonObject m_partitionObject;
     QJsonArray  m_templates;
     QJsonArray  m_groups;
     QString     m_partitionId;
+    int         m_partitionType = 1;
     QWidget     *m_titleWidget        = nullptr;
     bool         m_dragging           = false;
     QPoint       m_dragOffset;
 
     // UI 控件
-    QLineEdit      *m_nameEdit          = nullptr;
+    QLineEdit      *m_nameEdit         = nullptr;
+    QCheckBox      *m_changeNameInTimeCheck = nullptr;
+    QWidget        *m_renameFieldsWrap = nullptr;
+    QLineEdit      *m_changeNameEdit    = nullptr;
+    QDateTimeEdit  *m_changeDateTimeEdit = nullptr;
+    QTableWidget   *m_groupTable        = nullptr;
+    QWidget        *m_machinePathCard   = nullptr;
     QLineEdit      *m_pathEdit          = nullptr;
     QPushButton    *m_browseButton      = nullptr;
     QComboBox      *m_templateCombo     = nullptr;
+    QWidget        *m_ybEggWidget       = nullptr;
+    QButtonGroup   *m_ybEggGroup        = nullptr;
+    QRadioButton   *m_ybEggOnRadio      = nullptr;
+    QRadioButton   *m_ybEggOffRadio     = nullptr;
+    QButtonGroup   *m_scanButtonGroup   = nullptr;
+    QRadioButton   *m_scanWebRadio      = nullptr;
+    QRadioButton   *m_scanGameRadio     = nullptr;
+    QRadioButton   *m_scanBothRadio     = nullptr;
     QDateTimeEdit  *m_dateTimeEdit      = nullptr;
-    QCheckBox      *m_ybEggCheck        = nullptr;
-    QTableWidget   *m_groupTable        = nullptr;
+    QCheckBox      *m_scheduledDeleteCheck = nullptr;
+    QDateTimeEdit  *m_deleteDateTimeEdit = nullptr;
+    QWidget        *m_scriptCmdWidget   = nullptr;
     QRadioButton   *m_radioNoUpdate     = nullptr;
     QRadioButton   *m_radioOnlyRecharge = nullptr;
     QRadioButton   *m_radioAllUpdate    = nullptr;
     QButtonGroup   *m_cmdTypeGroup      = nullptr;
     QPushButton    *m_confirmButton     = nullptr;
     QPushButton    *m_cancelButton      = nullptr;
-    QLineEdit      *m_serverIpEdit      = nullptr;
-    QLineEdit      *m_serverPortEdit    = nullptr;
 };
 
 #endif // PARTITIONDIALOG_H
